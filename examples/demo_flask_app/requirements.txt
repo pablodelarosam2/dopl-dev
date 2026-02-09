@@ -1,0 +1,5 @@
+flask>=2.0
+requests>=2.28
+psycopg2-binary>=2.9
+# Install sim_sdk from parent directory
+-e ../../sim_sdk
