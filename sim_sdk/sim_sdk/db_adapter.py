@@ -19,6 +19,7 @@ from psycopg2.extras import RealDictCursor
 from sim_sdk.canonicalize import fingerprint_sql
 from sim_sdk.context import get_context
 from sim_sdk.store import StubStore
+from sim_sdk.trace import add_db_stub
 
 
 class SimWriteBlocked(Exception):
@@ -328,6 +329,15 @@ class SimDB:
                 "row_count": len(rows),
             },
         )
+
+        # Also add to trace collector for @sim_trace decorator support
+        add_db_stub({
+            "fingerprint": fp,
+            "ordinal": ordinal,
+            "rows": serializable_rows,
+            "sql": sql_str,
+            "params": _make_serializable(params),
+        })
 
     def close(self) -> None:
         """Close the database connection."""

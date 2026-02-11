@@ -16,6 +16,7 @@ from requests import PreparedRequest, Response, Session
 from sim_sdk.canonicalize import canonicalize, fingerprint
 from sim_sdk.context import get_context
 from sim_sdk.store import StubStore
+from sim_sdk.trace import add_http_stub
 
 
 # Store the original method
@@ -290,6 +291,16 @@ def _record_request(
                 "ordinal": ordinal,
             },
         )
+
+        # Also add to trace collector for @sim_trace decorator support
+        add_http_stub({
+            "fingerprint": fp,
+            "ordinal": ordinal,
+            "method": method,
+            "url": url,
+            "status": stub_data["status_code"],
+            "body": stub_data.get("body"),
+        })
 
     return response
 

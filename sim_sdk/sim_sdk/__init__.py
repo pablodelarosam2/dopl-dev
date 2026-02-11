@@ -22,6 +22,9 @@ from sim_sdk.clock import SimClock, sim_clock
 from sim_sdk.flask_middleware import sim_middleware, sim_capture
 from sim_sdk.http_patch import patch_requests, unpatch_requests
 from sim_sdk.db_adapter import SimDB, SimWriteBlocked
+from sim_sdk.trace import sim_trace, FixtureEvent, add_db_stub, add_http_stub
+from sim_sdk.sink import RecordSink, LocalSink, init_sink, get_default_sink, set_default_sink
+from sim_sdk.fetch import FixtureFetcher, Fixture, load_fixtures_for_replay
 
 __version__ = "0.1.0"
 
@@ -52,4 +55,19 @@ __all__ = [
     # DB
     "SimDB",
     "SimWriteBlocked",
+    # Trace
+    "sim_trace",
+    "FixtureEvent",
+    "add_db_stub",
+    "add_http_stub",
+    # Sink
+    "RecordSink",
+    "LocalSink",
+    "init_sink",
+    "get_default_sink",
+    "set_default_sink",
+    # Fetch
+    "FixtureFetcher",
+    "Fixture",
+    "load_fixtures_for_replay",
 ]

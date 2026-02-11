@@ -12,7 +12,10 @@ Run with different SIM_MODE values:
 - replay: Use stubs instead of real services
 """
 
+import atexit
 import os
+from pathlib import Path
+
 from flask import Flask, jsonify, request
 
 # Import sim_sdk components
@@ -21,6 +24,8 @@ from sim_sdk import (
     patch_requests,
     sim_clock,
     sim_middleware,
+    init_sink,
+    get_default_sink,
 )
 
 # Create Flask app
@@ -31,6 +36,18 @@ sim_middleware(app)
 
 # Patch requests library for HTTP interception
 patch_requests()
+
+# Initialize LocalSink for fixture recording in record mode
+if os.environ.get("SIM_MODE") == "record":
+    stub_dir = os.environ.get("SIM_STUB_DIR")
+    if stub_dir:
+        init_sink(
+            output_dir=Path(stub_dir),
+            service_name="demo-app",
+            endpoint_name="quote",
+        )
+        # Ensure fixtures are flushed on shutdown
+        atexit.register(lambda: get_default_sink() and get_default_sink().close())
 
 # Database connection (use env var or default)
 DATABASE_URL = os.environ.get(
