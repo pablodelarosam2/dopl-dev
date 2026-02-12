@@ -6,14 +6,18 @@ Features:
 - JSON deep-diff
 - Money tolerance (configurable absolute threshold)
 - Ignore paths for non-deterministic fields (request_id, timestamp, etc.)
+- HTML diff visualization with color highlighting
+- Optional PNG image export
 
 The diff engine takes two response sets as input and does not know their source.
 Whether they come from a golden snapshot file or a live baseline container is transparent.
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from deepdiff import DeepDiff
 
@@ -70,6 +74,216 @@ class DiffResult:
             "differences": [d.to_dict() for d in self.differences],
             "ignored_paths": self.ignored_paths,
         }
+
+    def to_html(self, include_json_diff: bool = True, golden_body: Optional[Dict] = None, candidate_body: Optional[Dict] = None) -> str:
+        """
+        Generate HTML visualization of the diff.
+
+        Args:
+            include_json_diff: Include side-by-side JSON comparison
+            golden_body: Original golden response body for JSON diff
+            candidate_body: Original candidate response body for JSON diff
+
+        Returns:
+            HTML string with styled diff visualization
+        """
+        status_class = "passed" if self.passed else "failed"
+        status_icon = "✅" if self.passed else "❌"
+
+        html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Diff Result: {self.fixture_id}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #1a1a2e; color: #eee; padding: 20px; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+        .header h1 {{ font-size: 24px; margin-bottom: 10px; }}
+        .header .meta {{ font-size: 14px; opacity: 0.9; }}
+        .status {{ display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; margin-top: 10px; }}
+        .status.passed {{ background: #10b981; color: white; }}
+        .status.failed {{ background: #ef4444; color: white; }}
+        .diff-table {{ width: 100%; border-collapse: collapse; background: #16213e; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }}
+        .diff-table th {{ background: #0f3460; padding: 15px; text-align: left; font-weight: 600; }}
+        .diff-table td {{ padding: 12px 15px; border-bottom: 1px solid #1a1a2e; }}
+        .diff-table tr:last-child td {{ border-bottom: none; }}
+        .path {{ font-family: monospace; color: #60a5fa; }}
+        .golden {{ color: #34d399; background: rgba(52, 211, 153, 0.1); padding: 4px 8px; border-radius: 4px; font-family: monospace; }}
+        .candidate {{ color: #f87171; background: rgba(248, 113, 113, 0.1); padding: 4px 8px; border-radius: 4px; font-family: monospace; }}
+        .message {{ color: #fbbf24; font-size: 13px; }}
+        .diff-type {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; text-transform: uppercase; }}
+        .diff-type.value_changed, .diff-type.money_tolerance_exceeded {{ background: #f59e0b; color: #1a1a2e; }}
+        .diff-type.item_added {{ background: #10b981; color: white; }}
+        .diff-type.item_removed {{ background: #ef4444; color: white; }}
+        .diff-type.status_code {{ background: #8b5cf6; color: white; }}
+        .diff-type.type_changed {{ background: #ec4899; color: white; }}
+        .json-diff {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }}
+        .json-panel {{ background: #16213e; border-radius: 10px; overflow: hidden; }}
+        .json-panel h3 {{ background: #0f3460; padding: 10px 15px; font-size: 14px; }}
+        .json-panel.golden h3 {{ border-left: 4px solid #34d399; }}
+        .json-panel.candidate h3 {{ border-left: 4px solid #f87171; }}
+        .json-content {{ padding: 15px; font-family: monospace; font-size: 13px; white-space: pre-wrap; max-height: 400px; overflow-y: auto; }}
+        .json-content .changed {{ background: rgba(251, 191, 36, 0.3); padding: 2px 4px; border-radius: 2px; }}
+        .ignored {{ margin-top: 20px; padding: 15px; background: #16213e; border-radius: 10px; }}
+        .ignored h3 {{ margin-bottom: 10px; color: #9ca3af; }}
+        .ignored ul {{ list-style: none; }}
+        .ignored li {{ padding: 5px 0; color: #6b7280; font-size: 13px; }}
+        .arrow {{ color: #9ca3af; margin: 0 10px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{status_icon} Diff Result</h1>
+            <div class="meta">
+                <strong>Fixture:</strong> {self.fixture_id} &nbsp;|&nbsp;
+                <strong>Endpoint:</strong> {self.endpoint}
+            </div>
+            <div class="status {status_class}">
+                {"PASSED" if self.passed else f"FAILED - {len(self.differences)} regression(s) detected"}
+            </div>
+        </div>
+'''
+
+        if self.differences:
+            html += '''
+        <table class="diff-table">
+            <thead>
+                <tr>
+                    <th style="width: 15%">Type</th>
+                    <th style="width: 20%">Path</th>
+                    <th style="width: 25%">Golden (Expected)</th>
+                    <th style="width: 25%">Candidate (Actual)</th>
+                    <th style="width: 15%">Issue</th>
+                </tr>
+            </thead>
+            <tbody>
+'''
+            for diff in self.differences:
+                diff_type_class = diff.diff_type.value
+                golden_val = json.dumps(diff.golden_value) if not isinstance(diff.golden_value, str) else diff.golden_value
+                candidate_val = json.dumps(diff.candidate_value) if not isinstance(diff.candidate_value, str) else diff.candidate_value
+
+                html += f'''
+                <tr>
+                    <td><span class="diff-type {diff_type_class}">{diff.diff_type.value.replace('_', ' ')}</span></td>
+                    <td class="path">{diff.path}</td>
+                    <td><span class="golden">{golden_val}</span></td>
+                    <td><span class="candidate">{candidate_val}</span></td>
+                    <td class="message">{diff.message}</td>
+                </tr>
+'''
+            html += '''
+            </tbody>
+        </table>
+'''
+
+        # Add JSON side-by-side diff if bodies provided
+        if include_json_diff and golden_body and candidate_body:
+            golden_json = json.dumps(golden_body, indent=2, default=str)
+            candidate_json = json.dumps(candidate_body, indent=2, default=str)
+
+            # Highlight changed paths in the JSON
+            changed_paths = {d.path for d in self.differences}
+
+            html += f'''
+        <div class="json-diff">
+            <div class="json-panel golden">
+                <h3>Golden (Expected)</h3>
+                <div class="json-content">{self._highlight_json(golden_json, changed_paths, 'golden')}</div>
+            </div>
+            <div class="json-panel candidate">
+                <h3>Candidate (Actual)</h3>
+                <div class="json-content">{self._highlight_json(candidate_json, changed_paths, 'candidate')}</div>
+            </div>
+        </div>
+'''
+
+        if self.ignored_paths:
+            html += '''
+        <div class="ignored">
+            <h3>Ignored Paths</h3>
+            <ul>
+'''
+            for path in self.ignored_paths:
+                html += f'                <li>• {path}</li>\n'
+            html += '''
+            </ul>
+        </div>
+'''
+
+        html += '''
+    </div>
+</body>
+</html>'''
+        return html
+
+    def _highlight_json(self, json_str: str, changed_paths: Set[str], side: str) -> str:
+        """Highlight changed values in JSON string."""
+        import html as html_module
+        result = html_module.escape(json_str)
+
+        # Simple highlighting - mark lines containing changed paths
+        for path in changed_paths:
+            # Get the last key in the path
+            key = path.split('.')[-1] if '.' in path else path
+            # Highlight the key and its value
+            pattern = rf'("{re.escape(key)}":\s*[^\n,}}]+)'
+            result = re.sub(pattern, r'<span class="changed">\1</span>', result)
+
+        return result
+
+    def save_html(self, filepath: Union[str, Path], **kwargs) -> Path:
+        """
+        Save diff visualization as HTML file.
+
+        Args:
+            filepath: Output file path
+            **kwargs: Additional arguments for to_html()
+
+        Returns:
+            Path to saved file
+        """
+        filepath = Path(filepath)
+        filepath.write_text(self.to_html(**kwargs), encoding='utf-8')
+        return filepath
+
+    def save_image(self, filepath: Union[str, Path], **kwargs) -> Optional[Path]:
+        """
+        Save diff visualization as PNG image.
+
+        Requires: pip install imgkit
+        Also requires wkhtmltopdf/wkhtmltoimage installed on system.
+
+        Args:
+            filepath: Output file path (.png)
+            **kwargs: Additional arguments for to_html()
+
+        Returns:
+            Path to saved image, or None if imgkit not available
+        """
+        try:
+            import imgkit
+        except ImportError:
+            print("Warning: imgkit not installed. Run: pip install imgkit")
+            print("Also install wkhtmltopdf: https://wkhtmltopdf.org/downloads.html")
+            return None
+
+        filepath = Path(filepath)
+        html = self.to_html(**kwargs)
+
+        try:
+            imgkit.from_string(html, str(filepath), options={
+                'width': '1200',
+                'quality': '100',
+                'enable-local-file-access': None,
+            })
+            return filepath
+        except Exception as e:
+            print(f"Warning: Failed to generate image: {e}")
+            return None
 
 
 @dataclass
@@ -445,6 +659,158 @@ class SimulationReport:
             "stub_misses": self.stub_misses,
             "blocked_writes": self.blocked_writes,
         }
+
+    def to_html(self) -> str:
+        """Generate HTML visualization of the full simulation report."""
+        status_class = "passed" if self.passed else "failed"
+        status_icon = "✅" if self.passed else "❌"
+
+        html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Simulation Report: {self.run_id}</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #1a1a2e; color: #eee; padding: 20px; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; margin-bottom: 20px; text-align: center; }}
+        .header h1 {{ font-size: 28px; margin-bottom: 10px; }}
+        .header .meta {{ font-size: 14px; opacity: 0.9; margin-bottom: 15px; }}
+        .status-badge {{ display: inline-block; padding: 10px 30px; border-radius: 30px; font-weight: bold; font-size: 18px; }}
+        .status-badge.passed {{ background: #10b981; color: white; }}
+        .status-badge.failed {{ background: #ef4444; color: white; }}
+        .summary {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin-bottom: 20px; }}
+        .stat {{ background: #16213e; padding: 20px; border-radius: 10px; text-align: center; }}
+        .stat .value {{ font-size: 32px; font-weight: bold; color: #60a5fa; }}
+        .stat .label {{ font-size: 12px; color: #9ca3af; margin-top: 5px; text-transform: uppercase; }}
+        .stat.failed .value {{ color: #ef4444; }}
+        .stat.passed .value {{ color: #10b981; }}
+        .section {{ background: #16213e; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }}
+        .section h2 {{ background: #0f3460; padding: 15px 20px; font-size: 16px; border-left: 4px solid #ef4444; }}
+        .section.success h2 {{ border-left-color: #10b981; }}
+        .diff-table {{ width: 100%; border-collapse: collapse; }}
+        .diff-table th {{ background: #0f3460; padding: 12px 15px; text-align: left; font-weight: 600; font-size: 13px; }}
+        .diff-table td {{ padding: 10px 15px; border-bottom: 1px solid #1a1a2e; font-size: 13px; }}
+        .path {{ font-family: monospace; color: #60a5fa; }}
+        .golden {{ color: #34d399; }}
+        .candidate {{ color: #f87171; }}
+        .endpoint {{ background: #8b5cf6; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
+        .fixture-id {{ color: #9ca3af; font-size: 12px; }}
+        .no-issues {{ padding: 30px; text-align: center; color: #10b981; font-size: 18px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{status_icon} Simulation Report</h1>
+            <div class="meta">
+                <strong>Run ID:</strong> {self.run_id} &nbsp;|&nbsp;
+                <strong>Candidate:</strong> {self.candidate_image}
+            </div>
+            <div class="status-badge {status_class}">
+                {"ALL TESTS PASSED" if self.passed else "REGRESSIONS DETECTED"}
+            </div>
+        </div>
+
+        <div class="summary">
+            <div class="stat">
+                <div class="value">{self.total_fixtures}</div>
+                <div class="label">Total Fixtures</div>
+            </div>
+            <div class="stat passed">
+                <div class="value">{self.passed_fixtures}</div>
+                <div class="label">Passed</div>
+            </div>
+            <div class="stat {"failed" if self.failed_fixtures > 0 else ""}">
+                <div class="value">{self.failed_fixtures}</div>
+                <div class="label">Failed</div>
+            </div>
+            <div class="stat {"failed" if self.stub_misses else ""}">
+                <div class="value">{len(self.stub_misses)}</div>
+                <div class="label">Stub Misses</div>
+            </div>
+            <div class="stat">
+                <div class="value">{len(self.blocked_writes)}</div>
+                <div class="label">Blocked Writes</div>
+            </div>
+        </div>
+'''
+
+        # Failed fixtures section
+        failed_results = [r for r in self.results if r.has_regressions]
+        if failed_results:
+            html += '''
+        <div class="section">
+            <h2>❌ Regressions Detected</h2>
+            <table class="diff-table">
+                <thead>
+                    <tr>
+                        <th>Endpoint</th>
+                        <th>Fixture</th>
+                        <th>Path</th>
+                        <th>Golden</th>
+                        <th>Candidate</th>
+                    </tr>
+                </thead>
+                <tbody>
+'''
+            for result in failed_results:
+                for diff in result.differences:
+                    golden_val = str(diff.golden_value)[:25]
+                    candidate_val = str(diff.candidate_value)[:25]
+                    html += f'''
+                    <tr>
+                        <td><span class="endpoint">{result.endpoint}</span></td>
+                        <td class="fixture-id">{result.fixture_id}</td>
+                        <td class="path">{diff.path}</td>
+                        <td class="golden">{golden_val}</td>
+                        <td class="candidate">{candidate_val}</td>
+                    </tr>
+'''
+            html += '''
+                </tbody>
+            </table>
+        </div>
+'''
+        else:
+            html += '''
+        <div class="section success">
+            <h2>✅ All Tests Passed</h2>
+            <div class="no-issues">No regressions detected. All fixtures matched golden outputs.</div>
+        </div>
+'''
+
+        html += '''
+    </div>
+</body>
+</html>'''
+        return html
+
+    def save_html(self, filepath: Union[str, Path]) -> Path:
+        """Save report as HTML file."""
+        filepath = Path(filepath)
+        filepath.write_text(self.to_html(), encoding='utf-8')
+        return filepath
+
+    def save_image(self, filepath: Union[str, Path]) -> Optional[Path]:
+        """Save report as PNG image (requires imgkit + wkhtmltoimage)."""
+        try:
+            import imgkit
+        except ImportError:
+            print("Warning: imgkit not installed. Run: pip install imgkit")
+            return None
+
+        filepath = Path(filepath)
+        try:
+            imgkit.from_string(self.to_html(), str(filepath), options={
+                'width': '1200',
+                'quality': '100',
+            })
+            return filepath
+        except Exception as e:
+            print(f"Warning: Failed to generate image: {e}")
+            return None
 
 
 def compare_responses(
