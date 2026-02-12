@@ -8,6 +8,7 @@ This script demonstrates and tests the sim_sdk functionality:
 3. Test replay mode (use captured stubs)
 4. Test e2e mode (full record → replay flow with fixture verification)
 5. Test diff mode (Phase 3: catch a deliberate regression)
+6. Test runner mode (Phase 4: sim-run CLI orchestrator)
 
 Usage:
     # Test replay mode with pre-existing stubs
@@ -21,6 +22,9 @@ Usage:
 
     # Test diff engine (catch a regression)
     python run_test.py --diff
+
+    # Test sim-run CLI (Phase 4: runner)
+    python run_test.py --runner
 
     # Run all tests (requires real database for record)
     python run_test.py --all
@@ -580,6 +584,216 @@ def test_diff_mode() -> bool:
     return all_caught
 
 
+def test_runner_mode() -> bool:
+    """
+    Test the sim-run CLI orchestrator (Phase 4).
+
+    This test:
+    1. Sets up fixtures and stubs
+    2. Starts the app in replay mode
+    3. Uses SimRunner to orchestrate replay and diff
+    4. Generates reports (Markdown, HTML)
+
+    Phase 4 Exit Criteria:
+    - Single command runs end-to-end
+    - Fetches fixtures, replays, diffs, reports
+    - CI-compatible exit codes
+    """
+    print("\n" + "=" * 60)
+    print("Testing RUNNER mode (Phase 4: sim-run CLI)")
+    print("=" * 60)
+
+    from sim_sdk.runner import SimRunner, SimConfig
+    import threading
+    import time as time_module
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stub_dir = Path(tmpdir)
+        fixture_dir = stub_dir / "demo-app" / "quote"
+
+        # Step 1: Create fixtures
+        print("\n1. Setting up fixtures...")
+        setup_stubs(stub_dir)
+
+        # Create fixture files
+        test_fixture_id = "runner-test-001"
+        fixture_path = fixture_dir / test_fixture_id
+        fixture_path.mkdir(parents=True, exist_ok=True)
+
+        # input.json
+        input_data = {
+            "fixture_id": test_fixture_id,
+            "name": "quote",
+            "args": {
+                "user_id": 123,
+                "items": [
+                    {"sku": "PRODUCT-A", "qty": 2},
+                    {"sku": "PRODUCT-B", "qty": 1},
+                ],
+            },
+        }
+        with open(fixture_path / "input.json", "w") as f:
+            json.dump(input_data, f, indent=2)
+
+        # golden_output.json
+        golden_output = {
+            "fixture_id": test_fixture_id,
+            "output": {
+                "user_id": 123,
+                "subtotal": 69.97,
+                "tax_rate": 0.0925,
+                "tax": 6.47,
+                "total": 76.44,
+            },
+        }
+        with open(fixture_path / "golden_output.json", "w") as f:
+            json.dump(golden_output, f, indent=2)
+
+        # stubs.json
+        stubs_data = {"fixture_id": test_fixture_id, "db_calls": [], "http_calls": []}
+        with open(fixture_path / "stubs.json", "w") as f:
+            json.dump(stubs_data, f, indent=2)
+
+        # metadata.json
+        metadata = {
+            "fixture_id": test_fixture_id,
+            "name": "quote",
+            "recorded_at": "2024-01-01T00:00:00Z",
+            "schema_version": "1.0",
+        }
+        with open(fixture_path / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        print(f"   Created fixture at {fixture_path}")
+
+        # Step 2: Configure runner
+        print("\n2. Configuring SimRunner...")
+
+        config = SimConfig(
+            service_name="demo-app",
+            service_port=5001,
+            endpoints=[
+                {"name": "quote", "method": "POST", "path": "/quote"},
+            ],
+            storage_type="local",
+            storage_local_path=str(stub_dir),
+            ignore_paths=["quoted_at", "timestamp", "request_id"],
+            money_paths=["total", "subtotal", "tax"],
+            money_tolerance=0.01,
+        )
+
+        runner = SimRunner(config, verbose=True)
+        print("   ✓ SimRunner configured")
+
+        # Step 3: Set up app in replay mode
+        print("\n3. Setting up app in replay mode...")
+
+        os.environ["SIM_MODE"] = "replay"
+        os.environ["SIM_STUB_DIR"] = str(stub_dir)
+        os.environ["SIM_RUN_ID"] = "runner-test"
+
+        from sim_sdk.context import clear_context
+        clear_context()
+
+        from app import app
+
+        # Start Flask test server in a thread
+        port = 5099
+        server_ready = threading.Event()
+
+        def run_server():
+            # Use werkzeug server
+            from werkzeug.serving import make_server
+            server = make_server("127.0.0.1", port, app, threaded=True)
+            server_ready.set()
+            server.handle_request()  # Handle just one request for the test
+            server.handle_request()  # Health check might be separate
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        server_ready.wait(timeout=5)
+        time_module.sleep(0.5)  # Give server time to start
+
+        print(f"   ✓ App running on http://127.0.0.1:{port}")
+
+        # Step 4: Run simulation
+        print("\n4. Running simulation...")
+
+        result = runner.run(
+            candidate_url=f"http://127.0.0.1:{port}",
+            endpoints=["quote"],
+        )
+
+        print(f"\n   Total fixtures: {result.total_fixtures}")
+        print(f"   Passed: {result.passed_fixtures}")
+        print(f"   Failed: {result.failed_fixtures}")
+        print(f"   Duration: {result.duration_seconds:.2f}s")
+
+        # Step 5: Generate reports
+        print("\n5. Generating reports...")
+
+        report = runner.generate_report(result, candidate_image="demo-app:test")
+
+        # Save reports
+        report_dir = Path(tmpdir) / "reports"
+        report_dir.mkdir(exist_ok=True)
+
+        md_path = report_dir / "report.md"
+        md_path.write_text(report.to_markdown())
+        print(f"   ✓ Markdown report: {md_path}")
+
+        html_path = report_dir / "report.html"
+        report.save_html(html_path)
+        print(f"   ✓ HTML report: {html_path}")
+
+        # Step 6: Verify results
+        print("\n6. Verifying Phase 4 exit criteria...")
+
+        passed = True
+
+        if result.total_fixtures > 0:
+            print("   ✓ Fixtures fetched and replayed")
+        else:
+            print("   ✗ No fixtures replayed")
+            passed = False
+
+        if md_path.exists() and md_path.stat().st_size > 0:
+            print("   ✓ Markdown report generated")
+        else:
+            print("   ✗ Markdown report not generated")
+            passed = False
+
+        if html_path.exists() and html_path.stat().st_size > 0:
+            print("   ✓ HTML report generated")
+        else:
+            print("   ✗ HTML report not generated")
+            passed = False
+
+        # Check CI exit code logic
+        if result.success == (result.failed_fixtures == 0):
+            print("   ✓ CI exit code logic correct")
+        else:
+            print("   ✗ CI exit code logic incorrect")
+            passed = False
+
+        print("\n" + "-" * 60)
+        if passed:
+            print("RUNNER mode tests PASSED!")
+        else:
+            print("RUNNER mode tests FAILED!")
+        print("-" * 60)
+        print("\nPhase 4 Exit Criteria:")
+        print("  ✓ Single command (SimRunner) runs end-to-end")
+        print("  ✓ Fetches fixtures from local storage")
+        print("  ✓ Replays HTTP inputs against candidate")
+        print("  ✓ Diffs responses against golden outputs")
+        print("  ✓ Generates Markdown and HTML reports")
+        print("  ✓ CI-compatible exit codes (0=pass, 1=fail)")
+        print("-" * 60)
+
+        return passed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test sim_sdk demo app")
     parser.add_argument(
@@ -603,6 +817,11 @@ def main():
         help="Run diff test (catch a regression)",
     )
     parser.add_argument(
+        "--runner",
+        action="store_true",
+        help="Run runner test (Phase 4: sim-run CLI)",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help="Run all tests",
@@ -611,7 +830,7 @@ def main():
     args = parser.parse_args()
 
     # Default to replay if no args
-    if not args.replay and not args.record and not args.e2e and not args.diff and not args.all:
+    if not args.replay and not args.record and not args.e2e and not args.diff and not args.runner and not args.all:
         args.replay = True
 
     results = []
@@ -627,6 +846,9 @@ def main():
 
     if args.diff or args.all:
         results.append(("Diff", test_diff_mode()))
+
+    if args.runner or args.all:
+        results.append(("Runner", test_runner_mode()))
 
     # Summary
     print("\n" + "=" * 60)

@@ -81,6 +81,38 @@ def is_patched() -> bool:
     return _original_request is not None
 
 
+def get_original_request() -> Optional[Callable]:
+    """
+    Get the original unpatched Session.request method.
+
+    Returns the original request method if patched, None otherwise.
+    Useful for making HTTP calls that should bypass simulation (e.g., runner calling candidate).
+    """
+    return _original_request
+
+
+def unpatched_request(method: str, url: str, **kwargs: Any) -> Response:
+    """
+    Make an HTTP request bypassing the simulation patch.
+
+    This is useful for test runners that need to call a candidate service
+    without going through the stub/replay logic.
+
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        url: Request URL
+        **kwargs: Additional arguments passed to requests
+
+    Returns:
+        Response object from the real HTTP call
+    """
+    session = Session()
+    if _original_request is not None:
+        return _original_request(session, method, url, **kwargs)
+    else:
+        return session.request(method, url, **kwargs)
+
+
 def _patched_request(
     self: Session,
     method: str,

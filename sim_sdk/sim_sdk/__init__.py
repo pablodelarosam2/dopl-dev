@@ -20,7 +20,7 @@ from sim_sdk.redaction import redact, DEFAULT_REDACT_PATHS
 from sim_sdk.store import StubStore
 from sim_sdk.clock import SimClock, sim_clock
 from sim_sdk.flask_middleware import sim_middleware, sim_capture
-from sim_sdk.http_patch import patch_requests, unpatch_requests
+from sim_sdk.http_patch import patch_requests, unpatch_requests, unpatched_request
 from sim_sdk.db_adapter import SimDB, SimWriteBlocked
 from sim_sdk.trace import sim_trace, FixtureEvent, add_db_stub, add_http_stub
 from sim_sdk.sink import RecordSink, LocalSink, init_sink, get_default_sink, set_default_sink
@@ -34,6 +34,7 @@ from sim_sdk.diff import (
     SimulationReport,
     compare_responses,
 )
+from sim_sdk.runner import SimRunner, SimConfig, RunnerResult
 
 __version__ = "0.1.0"
 
@@ -61,6 +62,7 @@ __all__ = [
     # HTTP
     "patch_requests",
     "unpatch_requests",
+    "unpatched_request",
     # DB
     "SimDB",
     "SimWriteBlocked",
@@ -87,4 +89,8 @@ __all__ = [
     "DiffType",
     "SimulationReport",
     "compare_responses",
+    # Runner
+    "SimRunner",
+    "SimConfig",
+    "RunnerResult",
 ]
