@@ -25,6 +25,15 @@ from sim_sdk.db_adapter import SimDB, SimWriteBlocked
 from sim_sdk.trace import sim_trace, FixtureEvent, add_db_stub, add_http_stub
 from sim_sdk.sink import RecordSink, LocalSink, init_sink, get_default_sink, set_default_sink
 from sim_sdk.fetch import FixtureFetcher, Fixture, load_fixtures_for_replay
+from sim_sdk.diff import (
+    DiffEngine,
+    DiffConfig,
+    DiffResult,
+    Difference,
+    DiffType,
+    SimulationReport,
+    compare_responses,
+)
 
 __version__ = "0.1.0"
 
@@ -70,4 +79,12 @@ __all__ = [
     "FixtureFetcher",
     "Fixture",
     "load_fixtures_for_replay",
+    # Diff
+    "DiffEngine",
+    "DiffConfig",
+    "DiffResult",
+    "Difference",
+    "DiffType",
+    "SimulationReport",
+    "compare_responses",
 ]

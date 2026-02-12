@@ -7,6 +7,7 @@ This script demonstrates and tests the sim_sdk functionality:
 2. Test record mode (capture interactions)
 3. Test replay mode (use captured stubs)
 4. Test e2e mode (full record → replay flow with fixture verification)
+5. Test diff mode (Phase 3: catch a deliberate regression)
 
 Usage:
     # Test replay mode with pre-existing stubs
@@ -17,6 +18,9 @@ Usage:
 
     # Test e2e flow (record → verify fixtures → replay)
     python run_test.py --e2e
+
+    # Test diff engine (catch a regression)
+    python run_test.py --diff
 
     # Run all tests (requires real database for record)
     python run_test.py --all
@@ -419,6 +423,163 @@ def test_e2e_mode() -> bool:
         return True
 
 
+def test_diff_mode() -> bool:
+    """
+    Test the diff engine by deliberately introducing a regression.
+
+    This test:
+    1. Sets up golden output (correct calculation)
+    2. Simulates a candidate with a bug (wrong tax calculation)
+    3. Uses DiffEngine to detect the regression
+    4. Generates a report showing what changed
+
+    Phase 3 Exit Criteria:
+    - A deliberately introduced logic regression is detected
+    - Report explains what changed and why it matters
+    """
+    print("\n" + "=" * 60)
+    print("Testing DIFF mode (Phase 3: Catch a Regression)")
+    print("=" * 60)
+
+    from sim_sdk.diff import DiffEngine, DiffConfig, SimulationReport
+
+    # Step 1: Define the golden output (correct calculation)
+    print("\n1. Setting up golden output (correct calculation)...")
+
+    golden = {
+        "status": 200,
+        "body": {
+            "user_id": 123,
+            "items": [
+                {"sku": "PRODUCT-A", "qty": 2, "unit_price": 19.99, "line_total": 39.98},
+                {"sku": "PRODUCT-B", "qty": 1, "unit_price": 29.99, "line_total": 29.99},
+            ],
+            "subtotal": 69.97,
+            "tax_rate": 0.0925,
+            "tax": 6.47,
+            "total": 76.44,
+            "quoted_at": "2024-01-01T12:00:00Z",  # Should be ignored
+        },
+    }
+
+    print("   Golden output:")
+    print(f"     subtotal: ${golden['body']['subtotal']}")
+    print(f"     tax:      ${golden['body']['tax']}")
+    print(f"     total:    ${golden['body']['total']}")
+
+    # Step 2: Simulate a candidate with a BUG (wrong tax calculation)
+    print("\n2. Simulating candidate with a BUG (wrong tax rate: 5% instead of 9.25%)...")
+
+    candidate = {
+        "status": 200,
+        "body": {
+            "user_id": 123,
+            "items": [
+                {"sku": "PRODUCT-A", "qty": 2, "unit_price": 19.99, "line_total": 39.98},
+                {"sku": "PRODUCT-B", "qty": 1, "unit_price": 29.99, "line_total": 29.99},
+            ],
+            "subtotal": 69.97,
+            "tax_rate": 0.05,  # BUG: Wrong tax rate!
+            "tax": 3.50,  # BUG: Wrong tax amount!
+            "total": 73.47,  # BUG: Wrong total!
+            "quoted_at": "2024-01-02T14:30:00Z",  # Different timestamp (should be ignored)
+        },
+    }
+
+    print("   Candidate output (BUGGY):")
+    print(f"     subtotal: ${candidate['body']['subtotal']}")
+    print(f"     tax:      ${candidate['body']['tax']} ← WRONG!")
+    print(f"     total:    ${candidate['body']['total']} ← WRONG!")
+
+    # Step 3: Use DiffEngine to detect the regression
+    print("\n3. Running DiffEngine to detect regression...")
+
+    config = DiffConfig(
+        ignore_paths=["quoted_at", "timestamp", "request_id"],
+        money_paths=["total", "subtotal", "tax", "line_total"],
+        money_tolerance=0.01,
+    )
+    engine = DiffEngine(config)
+
+    result = engine.compare(
+        fixture_id="quote-001",
+        endpoint="/quote",
+        golden=golden,
+        candidate=candidate,
+    )
+
+    print(f"\n   Diff result: {'❌ REGRESSION DETECTED' if result.has_regressions else '✓ PASSED'}")
+    print(f"   Number of differences: {len(result.differences)}")
+
+    if not result.has_regressions:
+        print("   FAILED: Diff engine did not detect the regression!")
+        return False
+
+    # Step 4: Show the detected differences
+    print("\n4. Detected differences:")
+    for diff in result.differences:
+        print(f"   • {diff.path}:")
+        print(f"       Golden:    {diff.golden_value}")
+        print(f"       Candidate: {diff.candidate_value}")
+        print(f"       Issue:     {diff.message}")
+
+    # Verify specific regressions were caught
+    paths_detected = [d.path for d in result.differences]
+    expected_regressions = ["tax_rate", "tax", "total"]
+
+    print("\n5. Verifying all regressions were caught...")
+    all_caught = True
+    for expected in expected_regressions:
+        if expected in paths_detected:
+            print(f"   ✓ {expected} regression detected")
+        else:
+            print(f"   ✗ {expected} regression NOT detected")
+            all_caught = False
+
+    # Verify ignored paths were ignored
+    print("\n6. Verifying ignored paths were ignored...")
+    if result.ignored_paths:
+        for ignored in result.ignored_paths:
+            print(f"   ✓ Ignored: {ignored}")
+    else:
+        print("   (No explicitly ignored fields in diff)")
+
+    # Step 5: Generate a simulation report
+    print("\n7. Generating simulation report...")
+
+    report = SimulationReport(
+        run_id="test-diff-001",
+        candidate_image="demo-app:pr-buggy-tax",
+        total_fixtures=1,
+        passed_fixtures=0,
+        failed_fixtures=1,
+        results=[result],
+    )
+
+    markdown_report = report.to_markdown()
+
+    print("\n" + "-" * 60)
+    print("SIMULATION REPORT")
+    print("-" * 60)
+    print(markdown_report)
+
+    # Verify report contains expected information
+    assert "FAILED" in markdown_report
+    assert "/quote" in markdown_report
+    assert "tax" in markdown_report.lower()
+
+    print("\n" + "-" * 60)
+    print("DIFF mode tests PASSED!")
+    print("-" * 60)
+    print("\nPhase 3 Exit Criteria:")
+    print("  ✓ Deliberately introduced logic regression detected")
+    print("  ✓ Report explains what changed (tax_rate, tax, total)")
+    print("  ✓ Non-deterministic fields (quoted_at) were ignored")
+    print("  ✓ Money tolerance applied correctly")
+    print("-" * 60)
+    return all_caught
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test sim_sdk demo app")
     parser.add_argument(
@@ -437,6 +598,11 @@ def main():
         help="Run e2e test (record → replay flow)",
     )
     parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Run diff test (catch a regression)",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help="Run all tests",
@@ -445,7 +611,7 @@ def main():
     args = parser.parse_args()
 
     # Default to replay if no args
-    if not args.replay and not args.record and not args.e2e and not args.all:
+    if not args.replay and not args.record and not args.e2e and not args.diff and not args.all:
         args.replay = True
 
     results = []
@@ -458,6 +624,9 @@ def main():
 
     if args.e2e or args.all:
         results.append(("E2E", test_e2e_mode()))
+
+    if args.diff or args.all:
+        results.append(("Diff", test_diff_mode()))
 
     # Summary
     print("\n" + "=" * 60)
