@@ -2,14 +2,23 @@
 PII redaction using JSONPath patterns.
 
 Removes or masks sensitive fields from data before capture/comparison.
+
+Note: JSONPath support requires the 'jsonpath-ng' package (optional dependency).
+      If not installed, only simple dict key-based redaction is available.
 """
 
 import copy
 import re
 from typing import Any, Dict, List, Optional, Union
 
-from jsonpath_ng import parse as jsonpath_parse
-from jsonpath_ng.exceptions import JsonPathParserError
+# Optional dependency - jsonpath_ng
+try:
+    from jsonpath_ng import parse as jsonpath_parse
+    from jsonpath_ng.exceptions import JsonPathParserError
+    HAS_JSONPATH = True
+except ImportError:
+    HAS_JSONPATH = False
+    JsonPathParserError = Exception
 
 
 # Default paths to redact (common PII fields)
@@ -41,6 +50,9 @@ def redact(
 ) -> Union[Dict, List, Any]:
     """
     Redact sensitive fields from data using JSONPath patterns.
+    
+    Note: Requires 'jsonpath-ng' package for full JSONPath support.
+          Falls back to simple key-based redaction if not available.
 
     Args:
         data: Data structure to redact
@@ -70,6 +82,10 @@ def redact(
     # Work on a copy unless in_place is True
     result = data if in_place else copy.deepcopy(data)
 
+    if not HAS_JSONPATH:
+        # Fallback to simple key-based redaction if jsonpath-ng not available
+        return _simple_redact(result, paths, placeholder)
+
     for path in paths:
         try:
             jsonpath_expr = jsonpath_parse(path)
@@ -85,6 +101,38 @@ def redact(
             continue
 
     return result
+
+
+def _simple_redact(data: Any, paths: List[str], placeholder: str) -> Any:
+    """
+    Simple key-based redaction when jsonpath-ng is not available.
+    
+    Only handles simple patterns like "$.password" or "$.*.email"
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    # Extract simple key names from paths
+    keys_to_redact = set()
+    for path in paths:
+        # Extract last part after $. or $.*. 
+        if '.*.' in path:
+            key = path.split('*.')[-1]
+            keys_to_redact.add(key)
+        elif path.startswith('$.'):
+            key = path[2:].split('.')[0]
+            keys_to_redact.add(key)
+    
+    # Recursively redact matching keys
+    def redact_dict(d):
+        if isinstance(d, dict):
+            return {k: placeholder if k in keys_to_redact else redact_dict(v) for k, v in d.items()}
+        elif isinstance(d, list):
+            return [redact_dict(item) for item in d]
+        else:
+            return d
+    
+    return redact_dict(data)
 
 
 def _set_value_at_path(data: Any, path: Any, value: Any) -> None:

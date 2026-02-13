@@ -1,96 +1,51 @@
 """
-sim_sdk - Simulation SDK for deterministic capture and replay
+sim_sdk - Pure Python SDK for deterministic capture and replay
 
-This package provides tools for instrumenting Flask applications to:
-- Capture request/response data
-- Record and replay HTTP calls
-- Record and replay database queries
-- Ensure deterministic execution for testing
+This is a framework-agnostic library that provides:
+- @sim_trace decorator for function tracing
+- sim_capture() context manager for operation capture
+- sim_db() context manager for database query capture
+
+Zero dependencies on web frameworks, HTTP libraries, or database drivers.
 """
 
-from sim_sdk.context import (
-    SimContext,
-    get_context,
-    set_context,
-    clear_context,
-    SimMode,
-)
-from sim_sdk.canonicalize import canonicalize, fingerprint
-from sim_sdk.redaction import redact, DEFAULT_REDACT_PATHS
-from sim_sdk.store import StubStore
-from sim_sdk.clock import SimClock, sim_clock
-from sim_sdk.flask_middleware import sim_middleware, sim_capture
-from sim_sdk.http_patch import patch_requests, unpatch_requests, unpatched_request
-from sim_sdk.db_adapter import SimDB, SimWriteBlocked
-from sim_sdk.trace import sim_trace, FixtureEvent, add_db_stub, add_http_stub
-from sim_sdk.sink import RecordSink, LocalSink, init_sink, get_default_sink, set_default_sink
-from sim_sdk.fetch import FixtureFetcher, Fixture, load_fixtures_for_replay
-from sim_sdk.diff import (
-    DiffEngine,
-    DiffConfig,
-    DiffResult,
-    Difference,
-    DiffType,
-    SimulationReport,
-    compare_responses,
-)
-from sim_sdk.runner import SimRunner, SimConfig, RunnerResult
+from .context import SimContext
+from .trace import sim_trace
+from .capture import sim_capture
+from .db import sim_db
+from .canonical import canonicalize_json, fingerprint, fingerprint_short
+from .config import SimConfig, load_config
+from .redaction import redact
+from .sink import RecordSink
+from .sink.local import LocalSink
+from .sink.s3 import S3Sink
+from .fixture import Fixture, CaptureRecord, TraceRecord, FixtureWriter
 
 __version__ = "0.1.0"
 
 __all__ = [
     # Context
     "SimContext",
-    "SimMode",
-    "get_context",
-    "set_context",
-    "clear_context",
+    # Primitives
+    "sim_trace",
+    "sim_capture",
+    "sim_db",
     # Canonicalization
-    "canonicalize",
+    "canonicalize_json",
     "fingerprint",
+    "fingerprint_short",
+    # Configuration
+    "SimConfig",
+    "load_config",
     # Redaction
     "redact",
-    "DEFAULT_REDACT_PATHS",
-    # Store
-    "StubStore",
-    # Clock
-    "SimClock",
-    "sim_clock",
-    # Flask
-    "sim_middleware",
-    "sim_capture",
-    # HTTP
-    "patch_requests",
-    "unpatch_requests",
-    "unpatched_request",
-    # DB
-    "SimDB",
-    "SimWriteBlocked",
-    # Trace
-    "sim_trace",
-    "FixtureEvent",
-    "add_db_stub",
-    "add_http_stub",
-    # Sink
+    # Sinks
     "RecordSink",
     "LocalSink",
-    "init_sink",
-    "get_default_sink",
-    "set_default_sink",
-    # Fetch
-    "FixtureFetcher",
+    "S3Sink",
+    # Fixtures
     "Fixture",
-    "load_fixtures_for_replay",
-    # Diff
-    "DiffEngine",
-    "DiffConfig",
-    "DiffResult",
-    "Difference",
-    "DiffType",
-    "SimulationReport",
-    "compare_responses",
-    # Runner
-    "SimRunner",
-    "SimConfig",
-    "RunnerResult",
+    "CaptureRecord",
+    "TraceRecord",
+    "FixtureWriter",
 ]

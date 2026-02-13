@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
-from sim_sdk.context import SimContext, SimMode, get_context, set_context, clear_context
-from sim_sdk.canonicalize import canonicalize, fingerprint
+from .context import SimContext
+from .canonical import canonicalize_json, fingerprint
 
 
 F = TypeVar("F", bound=Callable[..., Any])
