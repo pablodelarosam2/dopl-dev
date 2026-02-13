@@ -1,0 +1,11 @@
+# Optional dependencies for advanced serialization support
+# Install with: pip install -r requirements-optional.txt
+
+# Protobuf support for canonical serialization
+protobuf>=4.0
+
+# Avro support for canonical serialization  
+fastavro>=1.8
+
+# SQL normalization for query fingerprinting
+sqlparse>=0.4

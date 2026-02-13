@@ -13,9 +13,15 @@ from .context import SimContext
 from .trace import sim_trace
 from .capture import sim_capture
 from .db import sim_db
-from .canonical import canonicalize_json, fingerprint, fingerprint_short
+from .canonical import (
+    canonicalize_json,
+    fingerprint,
+    fingerprint_short,
+    normalize_sql,
+    fingerprint_sql,
+)
 from .config import SimConfig, load_config
-from .redaction import redact
+from .redaction import redact, pseudonymize, create_redactor, create_pseudonymizer
 from .sink import RecordSink
 from .sink.local import LocalSink
 from .sink.s3 import S3Sink
@@ -30,15 +36,20 @@ __all__ = [
     "sim_trace",
     "sim_capture",
     "sim_db",
-    # Canonicalization
+    # Canonicalization & Fingerprinting
     "canonicalize_json",
     "fingerprint",
     "fingerprint_short",
+    "normalize_sql",
+    "fingerprint_sql",
     # Configuration
     "SimConfig",
     "load_config",
-    # Redaction
+    # Redaction & Pseudonymization
     "redact",
+    "pseudonymize",
+    "create_redactor",
+    "create_pseudonymizer",
     # Sinks
     "RecordSink",
     "LocalSink",

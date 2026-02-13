@@ -1,0 +1,7 @@
+# Optional dependencies for advanced serialization support
+# Generated from requirements-optional.in
+# To update: pip-compile requirements-optional.in
+
+protobuf>=4.0
+fastavro>=1.8
+sqlparse>=0.4

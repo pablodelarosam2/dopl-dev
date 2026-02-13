@@ -1,13 +1,23 @@
 """
-PII redaction using JSONPath patterns.
+PII redaction and pseudonymization using JSONPath patterns.
 
-Removes or masks sensitive fields from data before capture/comparison.
+Provides two strategies for handling sensitive data:
+
+1. **Redaction**: Replace sensitive values with a placeholder (e.g., "[REDACTED]")
+   - Simple and secure
+   - ⚠️ Breaks determinism if redacted values affect control flow
+
+2. **Pseudonymization**: Hash sensitive values to consistent pseudonyms
+   - Preserves equality relationships (same input → same pseudonym)
+   - Maintains deterministic behavior for simulations
+   - Still protects actual PII values
 
 Note: JSONPath support requires the 'jsonpath-ng' package (optional dependency).
       If not installed, only simple dict key-based redaction is available.
 """
 
 import copy
+import hashlib
 import re
 from typing import Any, Dict, List, Optional, Union
 
@@ -40,6 +50,9 @@ DEFAULT_REDACT_PATHS = [
 
 # Placeholder for redacted values
 REDACTED_PLACEHOLDER = "[REDACTED]"
+
+# Default salt for pseudonymization (can be overridden for environment-specific salts)
+DEFAULT_PSEUDONYM_SALT = "sim_sdk_default_salt_v1"
 
 
 def redact(
@@ -84,7 +97,7 @@ def redact(
 
     if not HAS_JSONPATH:
         # Fallback to simple key-based redaction if jsonpath-ng not available
-        return _simple_redact(result, paths, placeholder)
+        return _simple_transform(result, paths, lambda v: placeholder)
 
     for path in paths:
         try:
@@ -103,36 +116,45 @@ def redact(
     return result
 
 
-def _simple_redact(data: Any, paths: List[str], placeholder: str) -> Any:
+def _simple_transform(data: Any, paths: List[str], transform_fn: callable) -> Any:
     """
-    Simple key-based redaction when jsonpath-ng is not available.
+    Simple key-based transformation when jsonpath-ng is not available.
     
     Only handles simple patterns like "$.password" or "$.*.email"
+    
+    Args:
+        data: Data to transform
+        paths: List of JSONPath patterns
+        transform_fn: Function to apply to matching values
+    
+    Returns:
+        Transformed data
     """
     if not isinstance(data, dict):
         return data
     
     # Extract simple key names from paths
-    keys_to_redact = set()
+    keys_to_transform = set()
     for path in paths:
         # Extract last part after $. or $.*. 
         if '.*.' in path:
             key = path.split('*.')[-1]
-            keys_to_redact.add(key)
+            keys_to_transform.add(key)
         elif path.startswith('$.'):
             key = path[2:].split('.')[0]
-            keys_to_redact.add(key)
+            keys_to_transform.add(key)
     
-    # Recursively redact matching keys
-    def redact_dict(d):
+    # Recursively transform matching keys
+    def transform_dict(d):
         if isinstance(d, dict):
-            return {k: placeholder if k in keys_to_redact else redact_dict(v) for k, v in d.items()}
+            return {k: transform_fn(v) if k in keys_to_transform else transform_dict(v) 
+                    for k, v in d.items()}
         elif isinstance(d, list):
-            return [redact_dict(item) for item in d]
+            return [transform_dict(item) for item in d]
         else:
             return d
     
-    return redact_dict(data)
+    return transform_dict(data)
 
 
 def _set_value_at_path(data: Any, path: Any, value: Any) -> None:
@@ -194,6 +216,95 @@ def _parse_path_segments(path_str: str) -> List[Union[str, int]]:
     return segments
 
 
+def pseudonymize(
+    data: Union[Dict, List, Any],
+    paths: Optional[List[str]] = None,
+    salt: str = DEFAULT_PSEUDONYM_SALT,
+    length: int = 16,
+    in_place: bool = False,
+) -> Union[Dict, List, Any]:
+    """
+    Pseudonymize sensitive fields using deterministic hashing.
+    
+    Unlike redaction, pseudonymization preserves equality relationships:
+    - Same input value → same pseudonym
+    - Different input values → different pseudonyms
+    
+    This is critical for deterministic simulations where control flow
+    depends on the values of sensitive fields (e.g., email-based routing).
+    
+    Args:
+        data: Data structure to pseudonymize
+        paths: List of JSONPath patterns to pseudonymize. Defaults to DEFAULT_REDACT_PATHS
+        salt: Salt for hashing (use environment-specific salt for isolation)
+        length: Length of pseudonym hash (default: 16 characters)
+        in_place: If True, modify data in place. Otherwise, work on a deep copy
+    
+    Returns:
+        Data with sensitive fields pseudonymized
+    
+    Examples:
+        >>> data = {"user": {"email": "alice@example.com", "name": "Alice"}}
+        >>> result = pseudonymize(data, ["$.*.email"])
+        >>> result
+        {"user": {"email": "a3f8c9d2e1b4f7a2", "name": "Alice"}}
+        
+        >>> # Same email always produces same pseudonym
+        >>> data2 = {"admin": {"email": "alice@example.com"}}
+        >>> result2 = pseudonymize(data2, ["$.*.email"])
+        >>> result2["admin"]["email"] == result["user"]["email"]
+        True
+    """
+    if data is None:
+        return None
+    
+    if not isinstance(data, (dict, list)):
+        return data
+    
+    if paths is None:
+        paths = DEFAULT_REDACT_PATHS
+    
+    if not paths:
+        return data
+    
+    # Work on a copy unless in_place is True
+    result = data if in_place else copy.deepcopy(data)
+    
+    # Create pseudonymizer function
+    def make_pseudonym(value: Any) -> str:
+        """Generate deterministic pseudonym for a value."""
+        if value is None:
+            return None
+        # Convert value to string for hashing
+        value_str = str(value)
+        # Hash with salt
+        hash_input = f"{salt}:{value_str}".encode('utf-8')
+        full_hash = hashlib.sha256(hash_input).hexdigest()
+        return full_hash[:length]
+    
+    if not HAS_JSONPATH:
+        # Fallback to simple key-based pseudonymization
+        return _simple_transform(result, paths, make_pseudonym)
+    
+    for path in paths:
+        try:
+            jsonpath_expr = jsonpath_parse(path)
+            matches = jsonpath_expr.find(result)
+            
+            for match in matches:
+                original_value = match.value
+                pseudonym = make_pseudonym(original_value)
+                _set_value_at_path(result, match.full_path, pseudonym)
+        except JsonPathParserError:
+            # Skip invalid patterns
+            continue
+        except Exception:
+            # Skip on any other error to avoid breaking capture
+            continue
+    
+    return result
+
+
 def create_redactor(
     paths: List[str],
     placeholder: str = REDACTED_PLACEHOLDER,
@@ -217,6 +328,33 @@ def create_redactor(
         return redact(data, paths=paths, placeholder=placeholder)
 
     return redactor
+
+
+def create_pseudonymizer(
+    paths: List[str],
+    salt: str = DEFAULT_PSEUDONYM_SALT,
+    length: int = 16,
+) -> callable:
+    """
+    Create a reusable pseudonymization function with preset paths.
+    
+    Args:
+        paths: List of JSONPath patterns to pseudonymize
+        salt: Salt for hashing
+        length: Length of pseudonym hash
+    
+    Returns:
+        A function that takes data and returns pseudonymized data
+    
+    Example:
+        >>> my_pseudonymizer = create_pseudonymizer(["$.email", "$.ssn"])
+        >>> my_pseudonymizer({"email": "test@example.com", "name": "John"})
+        {"email": "a3f8c9d2e1b4f7a2", "name": "John"}
+    """
+    def pseudonymizer(data: Union[Dict, List, Any]) -> Union[Dict, List, Any]:
+        return pseudonymize(data, paths=paths, salt=salt, length=length)
+    
+    return pseudonymizer
 
 
 def detect_sensitive_keys(data: Union[Dict, List, Any]) -> List[str]:
