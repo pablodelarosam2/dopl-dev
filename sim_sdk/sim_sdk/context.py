@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class SimMode(Enum):
@@ -38,9 +38,12 @@ class SimContext:
     """
     mode: SimMode = SimMode.OFF
     run_id: str = ""
+    fixture_id: str = ""
     request_id: str = ""
     stub_dir: Optional[Path] = None
+    sink: Any = None  # Optional RecordSink (typed as Any to avoid circular import)
     ordinal_counters: Dict[str, int] = field(default_factory=dict)
+    collected_stubs: List[Dict[str, Any]] = field(default_factory=list)
 
     def next_ordinal(self, fingerprint: str) -> int:
         """
@@ -125,10 +128,17 @@ def init_context(
     mode: Optional[SimMode] = None,
     run_id: Optional[str] = None,
     stub_dir: Optional[Path] = None,
+    sink: Any = None,
 ) -> SimContext:
     """
     Initialize simulation context with explicit values.
     Falls back to environment variables for unspecified values.
+
+    Args:
+        mode: Simulation mode (off, record, replay). Defaults to SIM_MODE env var.
+        run_id: Unique run identifier. Defaults to SIM_RUN_ID env var.
+        stub_dir: Directory for fixture files. Defaults to SIM_STUB_DIR env var.
+        sink: Optional RecordSink for emitting fixtures during recording.
     """
     env_context = _create_context_from_env()
 
@@ -136,6 +146,7 @@ def init_context(
         mode=mode if mode is not None else env_context.mode,
         run_id=run_id if run_id is not None else env_context.run_id,
         stub_dir=stub_dir if stub_dir is not None else env_context.stub_dir,
+        sink=sink,
     )
 
     set_context(context)
