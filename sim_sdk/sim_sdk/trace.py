@@ -153,19 +153,20 @@ def _make_serializable(value: Any) -> Any:
     return str(value)
 
 
-# -- Nesting helpers (stored as dynamic attrs on SimContext) ----------------
+# -- Shared helpers ---------------------------------------------------------
 
-def _trace_depth(ctx: SimContext) -> int:
-    """Current nesting depth of @sim_trace calls."""
-    return getattr(ctx, "_trace_depth", 0)
+def _prepare_call(
+    func: Callable, qualname: str, args: tuple, kwargs: dict, ctx: SimContext,
+) -> tuple:
+    """Compute fingerprint and ordinal for a traced call.
 
-
-def _inc_depth(ctx: SimContext) -> None:
-    ctx._trace_depth = getattr(ctx, "_trace_depth", 0) + 1  # type: ignore[attr-defined]
-
-
-def _dec_depth(ctx: SimContext) -> None:
-    ctx._trace_depth = max(0, getattr(ctx, "_trace_depth", 0) - 1)  # type: ignore[attr-defined]
+    Returns:
+        (args_data, input_fp, ordinal)
+    """
+    args_data = _bind_args(func, args, kwargs)
+    input_fp = _compute_fingerprint(qualname, args_data)
+    ordinal = ctx.next_ordinal(input_fp)
+    return args_data, input_fp, ordinal
 
 
 # -- Fixture I/O -----------------------------------------------------------
@@ -215,14 +216,11 @@ def _emit_record(
     output: Any,
     error_msg: Optional[str],
     duration_ms: float,
+    inner_stubs: List[Dict[str, Any]],
 ) -> None:
-    """Build a FixtureEvent and write it. Push as stub if nested."""
+    """Build a FixtureEvent, write it, and push as stub if nested."""
     output_data = _make_serializable(output)
     output_fp = fingerprint(output_data) if output is not None else ""
-
-    # Collect stubs that inner calls pushed during this scope
-    stubs = list(ctx.collected_stubs)
-    ctx.collected_stubs.clear()
 
     event = FixtureEvent(
         fixture_id=str(uuid.uuid4())[:8],
@@ -233,7 +231,7 @@ def _emit_record(
         input_fingerprint=input_fp,
         output=output_data,
         output_fingerprint=output_fp,
-        stubs=stubs,
+        stubs=inner_stubs,
         duration_ms=round(duration_ms, 2),
         error=error_msg,
         ordinal=ordinal,
@@ -242,7 +240,7 @@ def _emit_record(
     _write_fixture(event, ctx)
 
     # If we're inside an outer @sim_trace, push ourselves as a stub
-    if _trace_depth(ctx) > 0:
+    if ctx.trace_depth > 0:
         ctx.collected_stubs.append({
             "qualname": qualname,
             "input": args_data,
@@ -271,7 +269,7 @@ def _replay(
     output = fixture_data.get("output")
 
     # If nested, push as stub for the outer trace
-    if _trace_depth(ctx) > 0:
+    if ctx.trace_depth > 0:
         ctx.collected_stubs.append({
             "qualname": qualname,
             "input": args_data,
@@ -321,22 +319,17 @@ def sim_trace(
             @functools.wraps(f)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 ctx = get_context()
-
-                # Off mode — zero overhead
                 if not ctx.is_active:
                     return await f(*args, **kwargs)
 
-                # Compute fingerprint & ordinal
-                args_data = _bind_args(f, args, kwargs)
-                input_fp = _compute_fingerprint(qualname, args_data)
-                ordinal = ctx.next_ordinal(input_fp)
+                args_data, input_fp, ordinal = _prepare_call(f, qualname, args, kwargs, ctx)
 
-                # Replay mode — skip function body
                 if ctx.is_replaying:
                     return _replay(qualname, input_fp, ordinal, args_data, ctx)
 
-                # Record mode — execute & capture
-                _inc_depth(ctx)
+                # Record mode — execute, scope inner stubs, emit fixture
+                ctx.trace_depth += 1
+                stubs_snapshot = len(ctx.collected_stubs)
                 start = time.time()
                 error_msg = None
                 output = None
@@ -348,9 +341,11 @@ def sim_trace(
                     raise
                 finally:
                     duration_ms = (time.time() - start) * 1000
-                    _dec_depth(ctx)
+                    ctx.trace_depth -= 1
+                    inner_stubs = list(ctx.collected_stubs[stubs_snapshot:])
+                    del ctx.collected_stubs[stubs_snapshot:]
                     _emit_record(qualname, ctx, args_data, input_fp, ordinal,
-                                 output, error_msg, duration_ms)
+                                 output, error_msg, duration_ms, inner_stubs)
 
             return async_wrapper  # type: ignore[return-value]
 
@@ -358,22 +353,17 @@ def sim_trace(
             @functools.wraps(f)
             def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
                 ctx = get_context()
-
-                # Off mode — zero overhead
                 if not ctx.is_active:
                     return f(*args, **kwargs)
 
-                # Compute fingerprint & ordinal
-                args_data = _bind_args(f, args, kwargs)
-                input_fp = _compute_fingerprint(qualname, args_data)
-                ordinal = ctx.next_ordinal(input_fp)
+                args_data, input_fp, ordinal = _prepare_call(f, qualname, args, kwargs, ctx)
 
-                # Replay mode — skip function body
                 if ctx.is_replaying:
                     return _replay(qualname, input_fp, ordinal, args_data, ctx)
 
-                # Record mode — execute & capture
-                _inc_depth(ctx)
+                # Record mode — execute, scope inner stubs, emit fixture
+                ctx.trace_depth += 1
+                stubs_snapshot = len(ctx.collected_stubs)
                 start = time.time()
                 error_msg = None
                 output = None
@@ -385,9 +375,11 @@ def sim_trace(
                     raise
                 finally:
                     duration_ms = (time.time() - start) * 1000
-                    _dec_depth(ctx)
+                    ctx.trace_depth -= 1
+                    inner_stubs = list(ctx.collected_stubs[stubs_snapshot:])
+                    del ctx.collected_stubs[stubs_snapshot:]
                     _emit_record(qualname, ctx, args_data, input_fp, ordinal,
-                                 output, error_msg, duration_ms)
+                                 output, error_msg, duration_ms, inner_stubs)
 
             return sync_wrapper  # type: ignore[return-value]
 

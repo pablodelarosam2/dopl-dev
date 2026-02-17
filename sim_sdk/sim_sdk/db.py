@@ -169,16 +169,18 @@ class DBProxy:
         object.__setattr__(self, "_queries_captured", [])
 
     def __getattr__(self, attr: str) -> Any:
-        """Delegate attribute access to the underlying DB object.
+        """Intercept 'query'/'execute'; delegate everything else to the real DB object.
 
-        Intercepts 'query' and 'execute' to capture/replay.
+        Only __getattr__ (not __getattribute__) is used, so our own _fields
+        (set via object.__setattr__ in __init__) resolve normally without
+        triggering this method.
         """
         if attr in ("query", "execute"):
             return self._make_interceptor(attr)
         return getattr(object.__getattribute__(self, "_db_object"), attr)
 
     def _make_interceptor(self, method_name: str):
-        """Create an interceptor function for query/execute methods."""
+        """Return a closure that routes query/execute through _intercept_call."""
         def interceptor(sql: str, params: Any = None, *args: Any, **kwargs: Any) -> Any:
             return self._intercept_call(method_name, sql, params, *args, **kwargs)
         return interceptor
@@ -187,7 +189,7 @@ class DBProxy:
         self, method_name: str, sql: str, params: Any = None,
         *args: Any, **kwargs: Any,
     ) -> Any:
-        """Core interception logic for DB calls."""
+        """Route a DB call to replay, record, or passthrough based on mode."""
         ctx = object.__getattribute__(self, "_ctx")
         name = object.__getattribute__(self, "_name")
         db_object = object.__getattribute__(self, "_db_object")

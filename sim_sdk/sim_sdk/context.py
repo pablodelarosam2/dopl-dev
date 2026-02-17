@@ -44,6 +44,7 @@ class SimContext:
     sink: Any = None  # Optional RecordSink (typed as Any to avoid circular import)
     ordinal_counters: Dict[str, int] = field(default_factory=dict)
     collected_stubs: List[Dict[str, Any]] = field(default_factory=list)
+    trace_depth: int = 0
 
     def next_ordinal(self, fingerprint: str) -> int:
         """
@@ -58,11 +59,20 @@ class SimContext:
         """Reset ordinal counters (typically at start of new request)."""
         self.ordinal_counters.clear()
 
-    def new_request_id(self) -> str:
-        """Generate and set a new request ID."""
+    def start_new_request(self) -> str:
+        """Generate a new request ID and reset all per-request state.
+
+        Clears ordinal counters, collected stubs, and trace depth.
+        """
         self.request_id = str(uuid.uuid4())[:8]
-        self.reset_ordinals()
+        self.reset()
         return self.request_id
+
+    def reset(self) -> None:
+        """Reset all per-request state: ordinals, stubs, and trace depth."""
+        self.ordinal_counters.clear()
+        self.collected_stubs.clear()
+        self.trace_depth = 0
 
     @property
     def is_active(self) -> bool:
