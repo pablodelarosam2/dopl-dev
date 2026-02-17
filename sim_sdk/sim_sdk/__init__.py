@@ -12,7 +12,7 @@ Zero dependencies on web frameworks, HTTP libraries, or database drivers.
 from .context import SimContext, SimMode, get_context, set_context, clear_context, init_context
 from .trace import sim_trace, SimStubMissError, FixtureEvent
 from .capture import sim_capture, CaptureHandle
-from .db import sim_db
+from .db import sim_db, SimWriteBlockedError, DBProxy
 from .canonical import (
     canonicalize_json,
     fingerprint,
@@ -44,6 +44,8 @@ __all__ = [
     "sim_capture",
     "CaptureHandle",
     "sim_db",
+    "SimWriteBlockedError",
+    "DBProxy",
     # Canonicalization & Fingerprinting
     "canonicalize_json",
     "fingerprint",
