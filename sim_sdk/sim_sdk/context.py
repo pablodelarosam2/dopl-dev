@@ -1,16 +1,19 @@
 """
-Sim context management - thread-local storage for simulation state.
+Sim context management — contextvars-based storage for simulation state.
+
+Uses Python's contextvars.ContextVar for request-scoped state that is both
+thread-safe and async-safe. Each thread and each asyncio Task gets its own
+context automatically.
 
 Environment Variables:
     SIM_MODE: Operating mode (off, record, replay)
     SIM_RUN_ID: Unique identifier for this simulation run
     SIM_STUB_DIR: Directory for stub files
-    SIM_FROZEN_TIME: ISO format datetime to freeze time at (optional)
 """
 
 import os
-import threading
 import uuid
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -27,14 +30,18 @@ class SimMode(Enum):
 @dataclass
 class SimContext:
     """
-    Thread-local simulation context.
+    Request-scoped simulation context.
 
     Attributes:
         mode: Current simulation mode (off, record, replay)
-        run_id: Unique identifier for this run
+        run_id: Unique identifier for this simulation run
+        fixture_id: Identifier for the current fixture set
         request_id: Unique identifier for current request
         stub_dir: Directory where stubs are stored
+        sink: Optional RecordSink for emitting fixtures
         ordinal_counters: Track call order per fingerprint within a request
+        collected_stubs: Stubs collected from inner sim_capture/sim_db calls
+        trace_depth: Current nesting depth of @sim_trace calls
     """
     mode: SimMode = SimMode.OFF
     run_id: str = ""
@@ -47,10 +54,7 @@ class SimContext:
     trace_depth: int = 0
 
     def next_ordinal(self, fingerprint: str) -> int:
-        """
-        Get the next ordinal for a fingerprint and increment the counter.
-        Used to handle multiple calls with the same fingerprint in one request.
-        """
+        """Get the next ordinal for a fingerprint and increment the counter."""
         current = self.ordinal_counters.get(fingerprint, 0)
         self.ordinal_counters[fingerprint] = current + 1
         return current
@@ -89,30 +93,55 @@ class SimContext:
         """Check if in replay mode."""
         return self.mode == SimMode.REPLAY
 
+    # -- ContextVar class-level API -----------------------------------------
 
-# Thread-local storage for context
-_local = threading.local()
+    @staticmethod
+    def get_current() -> Optional["SimContext"]:
+        """Return the current context, or None if not set."""
+        return _context_var.get()
+
+    @staticmethod
+    def set_current(ctx: "SimContext") -> Token:
+        """Set the current context and return a Token for later reset."""
+        return _context_var.set(ctx)
+
+    @staticmethod
+    def reset_current(token: Token) -> None:
+        """Restore the context to the value before the matching set_current()."""
+        _context_var.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# ContextVar — thread-safe + async-safe context storage
+# ---------------------------------------------------------------------------
+
+_context_var: ContextVar[Optional[SimContext]] = ContextVar(
+    "sim_context", default=None,
+)
 
 
 def get_context() -> SimContext:
     """
-    Get the current thread's simulation context.
-    Creates one from environment variables if not exists.
+    Get the current simulation context.
+
+    If no context has been set for the current thread/task, creates one
+    from environment variables (SIM_MODE, SIM_RUN_ID, SIM_STUB_DIR).
     """
-    if not hasattr(_local, "context"):
-        _local.context = _create_context_from_env()
-    return _local.context
+    ctx = _context_var.get()
+    if ctx is None:
+        ctx = _create_context_from_env()
+        _context_var.set(ctx)
+    return ctx
 
 
 def set_context(context: SimContext) -> None:
-    """Set the simulation context for the current thread."""
-    _local.context = context
+    """Set the simulation context for the current thread/task."""
+    _context_var.set(context)
 
 
 def clear_context() -> None:
-    """Clear the simulation context for the current thread."""
-    if hasattr(_local, "context"):
-        delattr(_local, "context")
+    """Clear the simulation context for the current thread/task."""
+    _context_var.set(None)
 
 
 def _create_context_from_env() -> SimContext:
@@ -134,18 +163,20 @@ def _create_context_from_env() -> SimContext:
     )
 
 
-def init_context(
+def init_sim(
     mode: Optional[SimMode] = None,
     run_id: Optional[str] = None,
     stub_dir: Optional[Path] = None,
     sink: Any = None,
 ) -> SimContext:
     """
-    Initialize simulation context with explicit values.
-    Falls back to environment variables for unspecified values.
+    Initialize simulation context at app startup.
+
+    Falls back to environment variables for unspecified values:
+    SIM_MODE (default: off), SIM_RUN_ID (default: random), SIM_STUB_DIR.
 
     Args:
-        mode: Simulation mode (off, record, replay). Defaults to SIM_MODE env var.
+        mode: Simulation mode. Defaults to SIM_MODE env var.
         run_id: Unique run identifier. Defaults to SIM_RUN_ID env var.
         stub_dir: Directory for fixture files. Defaults to SIM_STUB_DIR env var.
         sink: Optional RecordSink for emitting fixtures during recording.
@@ -161,3 +192,7 @@ def init_context(
 
     set_context(context)
     return context
+
+
+# Backward-compatible alias
+init_context = init_sim
