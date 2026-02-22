@@ -19,13 +19,13 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 from .context import SimContext, SimMode, get_context
 from .canonical import canonicalize_json, fingerprint
+from .fixture.schema import FixtureEvent
 
 logger = logging.getLogger(__name__)
 
@@ -67,45 +67,6 @@ class SimStubMissError(Exception):
             msg += f"\n  Expected at: {expected}"
 
         super().__init__(msg)
-
-
-# ---------------------------------------------------------------------------
-# FixtureEvent — emitted to RecordSink during recording
-# ---------------------------------------------------------------------------
-
-@dataclass
-class FixtureEvent:
-    """A complete fixture event containing input, output, and captured stubs."""
-
-    fixture_id: str
-    qualname: str
-    run_id: str
-    recorded_at: str
-    input: Dict[str, Any] = field(default_factory=dict)
-    input_fingerprint: str = ""
-    output: Any = None
-    output_fingerprint: str = ""
-    stubs: List[Dict[str, Any]] = field(default_factory=list)
-    duration_ms: float = 0.0
-    error: Optional[str] = None
-    ordinal: int = 0
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
-        return {
-            "fixture_id": self.fixture_id,
-            "qualname": self.qualname,
-            "run_id": self.run_id,
-            "recorded_at": self.recorded_at,
-            "input": self.input,
-            "input_fingerprint": self.input_fingerprint,
-            "output": self.output,
-            "output_fingerprint": self.output_fingerprint,
-            "stubs": self.stubs,
-            "duration_ms": self.duration_ms,
-            "error": self.error,
-            "ordinal": self.ordinal,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +114,6 @@ def _make_serializable(value: Any) -> Any:
     return str(value)
 
 
-# -- Shared helpers ---------------------------------------------------------
-
 def _prepare_call(
     func: Callable, qualname: str, args: tuple, kwargs: dict, ctx: SimContext,
 ) -> tuple:
@@ -169,29 +128,7 @@ def _prepare_call(
     return args_data, input_fp, ordinal
 
 
-# -- Fixture I/O -----------------------------------------------------------
-
-def _write_fixture(event: FixtureEvent, ctx: SimContext) -> None:
-    """Persist a fixture event (via sink or directly to stub_dir)."""
-    data = event.to_dict()
-
-    # Prefer sink if available
-    if ctx.sink is not None:
-        key = _fixture_key(event.qualname, event.input_fingerprint, event.ordinal)
-        ctx.sink.write(key, data)
-        return
-
-    # Fallback: write directly to stub_dir
-    if ctx.stub_dir is not None:
-        key = _fixture_key(event.qualname, event.input_fingerprint, event.ordinal)
-        filepath = ctx.stub_dir / key
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
-        return
-
-    logger.debug("No sink or stub_dir configured — fixture %s discarded", event.fixture_id)
-
+# -- Replay helpers ---------------------------------------------------------
 
 def _read_fixture(
     qualname: str, input_fp: str, ordinal: int, stub_dir: Path,
@@ -204,52 +141,6 @@ def _read_fixture(
             return json.load(f)
     return None
 
-
-# -- Record emission (shared by sync/async) --------------------------------
-
-def _emit_record(
-    qualname: str,
-    ctx: SimContext,
-    args_data: Dict[str, Any],
-    input_fp: str,
-    ordinal: int,
-    output: Any,
-    error_msg: Optional[str],
-    duration_ms: float,
-    inner_stubs: List[Dict[str, Any]],
-) -> None:
-    """Build a FixtureEvent, write it, and push as stub if nested."""
-    output_data = _make_serializable(output)
-    output_fp = fingerprint(output_data) if output is not None else ""
-
-    event = FixtureEvent(
-        fixture_id=str(uuid.uuid4())[:8],
-        qualname=qualname,
-        run_id=ctx.run_id,
-        recorded_at=datetime.now(timezone.utc).isoformat(),
-        input=args_data,
-        input_fingerprint=input_fp,
-        output=output_data,
-        output_fingerprint=output_fp,
-        stubs=inner_stubs,
-        duration_ms=round(duration_ms, 2),
-        error=error_msg,
-        ordinal=ordinal,
-    )
-
-    _write_fixture(event, ctx)
-
-    # If we're inside an outer @sim_trace, push ourselves as a stub
-    if ctx.trace_depth > 0:
-        ctx.collected_stubs.append({
-            "qualname": qualname,
-            "input": args_data,
-            "output": output_data,
-            "source": "record",
-        })
-
-
-# -- Replay helper ----------------------------------------------------------
 
 def _replay(
     qualname: str,
@@ -268,7 +159,6 @@ def _replay(
 
     output = fixture_data.get("output")
 
-    # If nested, push as stub for the outer trace
     if ctx.trace_depth > 0:
         ctx.collected_stubs.append({
             "qualname": qualname,
@@ -278,6 +168,52 @@ def _replay(
         })
 
     return output
+
+
+# -- Record emission --------------------------------------------------------
+
+def _emit_record(
+    qualname: str,
+    ctx: SimContext,
+    args_data: Dict[str, Any],
+    input_fp: str,
+    ordinal: int,
+    output: Any,
+    error_msg: Optional[str],
+    duration_ms: float,
+    inner_stubs: List[Dict[str, Any]],
+) -> None:
+    """Build a FixtureEvent and emit it through the configured sink."""
+    output_data = _make_serializable(output)
+    output_fp = fingerprint(output_data) if output is not None else ""
+
+    event = FixtureEvent(
+        fixture_id=str(uuid.uuid4())[:8],
+        qualname=qualname,
+        run_id=ctx.run_id,
+        recorded_at=datetime.now(timezone.utc).isoformat(),
+        input=args_data,
+        input_fingerprint=input_fp,
+        output=output_data,
+        output_fingerprint=output_fp,
+        stubs=inner_stubs,
+        duration_ms=round(duration_ms, 2),
+        error=error_msg,
+        ordinal=ordinal,
+    )
+
+    if ctx.sink is not None:
+        ctx.sink.emit(event)
+    else:
+        logger.debug("No sink configured — fixture %s discarded", event.fixture_id)
+
+    if ctx.trace_depth > 0:
+        ctx.collected_stubs.append({
+            "qualname": qualname,
+            "input": args_data,
+            "output": output_data,
+            "source": "record",
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +263,6 @@ def sim_trace(
                 if ctx.is_replaying:
                     return _replay(qualname, input_fp, ordinal, args_data, ctx)
 
-                # Record mode — execute, scope inner stubs, emit fixture
                 ctx.trace_depth += 1
                 stubs_snapshot = len(ctx.collected_stubs)
                 start = time.time()
@@ -361,7 +296,6 @@ def sim_trace(
                 if ctx.is_replaying:
                     return _replay(qualname, input_fp, ordinal, args_data, ctx)
 
-                # Record mode — execute, scope inner stubs, emit fixture
                 ctx.trace_depth += 1
                 stubs_snapshot = len(ctx.collected_stubs)
                 start = time.time()

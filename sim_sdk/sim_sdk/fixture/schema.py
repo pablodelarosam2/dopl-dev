@@ -3,84 +3,43 @@ Fixture file schemas and data models.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 
 @dataclass
-class TraceRecord:
-    """
-    A single traced function call.
-    """
-    function_name: str
-    args: List[Any]
-    kwargs: Dict[str, Any]
-    result: Any
-    exception: Optional[Dict[str, Any]] = None
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    duration_ms: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class FixtureEvent:
+    """A complete fixture event emitted by @sim_trace during recording.
 
+    Contains the input args, return value, collected inner stubs,
+    and metadata for a single traced function call.
+    """
 
-@dataclass
-class CaptureRecord:
-    """
-    A captured block of operations.
-    """
-    name: str
-    captures: List[Any] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    duration_ms: Optional[float] = None
-
-
-@dataclass
-class Fixture:
-    """
-    A complete fixture file containing all recorded operations.
-    """
     fixture_id: str
-    timestamp: str
-    traces: List[TraceRecord] = field(default_factory=list)
-    captures: List[CaptureRecord] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
+    qualname: str
+    run_id: str
+    recorded_at: str
+    input: Dict[str, Any] = field(default_factory=dict)
+    input_fingerprint: str = ""
+    output: Any = None
+    output_fingerprint: str = ""
+    stubs: List[Dict[str, Any]] = field(default_factory=list)
+    duration_ms: float = 0.0
+    error: Optional[str] = None
+    ordinal: int = 0
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert fixture to dictionary for serialization."""
         return {
-            'fixture_id': self.fixture_id,
-            'timestamp': self.timestamp,
-            'traces': [self._trace_to_dict(t) for t in self.traces],
-            'captures': [self._capture_to_dict(c) for c in self.captures],
-            'metadata': self.metadata
+            "fixture_id": self.fixture_id,
+            "qualname": self.qualname,
+            "run_id": self.run_id,
+            "recorded_at": self.recorded_at,
+            "input": self.input,
+            "input_fingerprint": self.input_fingerprint,
+            "output": self.output,
+            "output_fingerprint": self.output_fingerprint,
+            "stubs": self.stubs,
+            "duration_ms": self.duration_ms,
+            "error": self.error,
+            "ordinal": self.ordinal,
         }
-    
-    def _trace_to_dict(self, trace: TraceRecord) -> Dict[str, Any]:
-        """Convert trace record to dictionary."""
-        result = {
-            'function_name': trace.function_name,
-            'args': trace.args,
-            'kwargs': trace.kwargs,
-            'result': trace.result,
-            'timestamp': trace.timestamp
-        }
-        if trace.exception:
-            result['exception'] = trace.exception
-        if trace.duration_ms:
-            result['duration_ms'] = trace.duration_ms
-        if trace.metadata:
-            result['metadata'] = trace.metadata
-        return result
-    
-    def _capture_to_dict(self, capture: CaptureRecord) -> Dict[str, Any]:
-        """Convert capture record to dictionary."""
-        result = {
-            'name': capture.name,
-            'captures': capture.captures,
-            'timestamp': capture.timestamp
-        }
-        if capture.duration_ms:
-            result['duration_ms'] = capture.duration_ms
-        if capture.metadata:
-            result['metadata'] = capture.metadata
-        return result

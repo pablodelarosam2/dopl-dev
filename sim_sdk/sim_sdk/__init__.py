@@ -10,7 +10,7 @@ Zero dependencies on web frameworks, HTTP libraries, or database drivers.
 """
 
 from .context import SimContext, SimMode, get_context, set_context, clear_context, init_sim, init_context
-from .trace import sim_trace, SimStubMissError, FixtureEvent
+from .trace import sim_trace, SimStubMissError
 from .capture import sim_capture, CaptureHandle
 from .db import sim_db, SimWriteBlockedError, DBProxy
 from .canonical import (
@@ -23,9 +23,8 @@ from .canonical import (
 from .config import SimConfig, load_config
 from .redaction import redact, pseudonymize, create_redactor, create_pseudonymizer
 from .sink import RecordSink
-from .sink.local import LocalSink
 from .sink.s3 import S3Sink
-from .fixture import Fixture, CaptureRecord, TraceRecord, FixtureWriter
+from .fixture import Fixture, CaptureRecord, TraceRecord, FixtureEvent, FixtureWriter
 
 __version__ = "0.1.0"
 
@@ -41,7 +40,6 @@ __all__ = [
     # Primitives
     "sim_trace",
     "SimStubMissError",
-    "FixtureEvent",
     "sim_capture",
     "CaptureHandle",
     "sim_db",
@@ -63,11 +61,11 @@ __all__ = [
     "create_pseudonymizer",
     # Sinks
     "RecordSink",
-    "LocalSink",
     "S3Sink",
     # Fixtures
     "Fixture",
     "CaptureRecord",
     "TraceRecord",
+    "FixtureEvent",
     "FixtureWriter",
 ]
