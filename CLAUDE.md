@@ -12,7 +12,7 @@ This is not a guideline — it is a **hard constraint enforced in CI**. The SDK 
 - Python context managers (via `with` blocks)
 - Python dicts, lists, strings, numbers (the data it captures)
 - `contextvars` (for request-scoped state)
-- Standard library: `json`, `hashlib`, `threading`, `logging`, `time`, `uuid`
+- Standard library: `json`, `hashlib`, `contextvars`, `logging`, `time`, `uuid`
 - `boto3` (S3 only, isolated in `sim_sdk/sink/s3.py`)
 
 ### What the SDK does NOT know about
@@ -57,7 +57,7 @@ dopl-dev/
 │   │   ├── canonical.py          # JSON canonicalization & fingerprinting
 │   │   ├── capture.py            # sim_capture() context manager
 │   │   ├── config.py             # Configuration loader (sim.yaml)
-│   │   ├── context.py            # Thread-local simulation context
+│   │   ├── context.py            # SimContext + contextvars management
 │   │   ├── db.py                 # sim_db() context manager
 │   │   ├── redaction.py          # PII redaction & pseudonymization
 │   │   ├── trace.py              # @sim_trace decorator
@@ -96,7 +96,8 @@ All public symbols are exported from `sim_sdk/__init__.py`:
 
 | Symbol | Module | Purpose |
 |--------|--------|---------|
-| `SimContext` | `context.py` | Thread-local simulation state |
+| `SimContext` | `context.py` | Request-scoped simulation state (contextvars) |
+| `init_sim()` | `context.py` | Initialize context at app startup |
 | `@sim_trace` | `trace.py` | Decorator to trace function calls |
 | `sim_capture()` | `capture.py` | Context manager for capturing operations |
 | `sim_db()` | `db.py` | Context manager for wrapping DB connections |
@@ -162,9 +163,14 @@ except ImportError:
     HAS_BOTO3 = False
 ```
 
-### Thread-local state
+### Context management
 
-Use `threading.local()` for per-thread context. Never use global mutable state.
+Use `contextvars.ContextVar` for request-scoped state. This is both thread-safe and async-safe. Never use `threading.local()` or global mutable state.
+
+```python
+from contextvars import ContextVar
+_context_var: ContextVar[Optional[SimContext]] = ContextVar("sim_context", default=None)
+```
 
 ### Environment variables
 
@@ -233,7 +239,77 @@ Put them in `examples/<name>/` with their own `requirements.txt`. Framework depe
 
 ---
 
-## 7. Architecture Principles
+## 7. Clean Code Patterns
+
+This codebase follows Robert C. Martin's *Clean Code* principles. All contributors must adhere to these patterns.
+
+### Functions
+
+- **Small functions**: Each function does one thing. If a function has more than ~20 lines, consider splitting it.
+- **One level of abstraction per function**: Don't mix high-level orchestration with low-level detail in the same function. Extract helpers.
+- **Intent-revealing names**: `start_new_request()` not `new_request_id()`. The name should describe the *why*, not the *what*.
+- **No side effects hidden in names**: If a function resets state, the name must say so.
+
+### DRY (Don't Repeat Yourself)
+
+- **Extract shared logic into helpers**: If the same pattern appears in sync and async wrappers, extract it.
+  ```python
+  # Good: shared helper
+  args_data, input_fp, ordinal = _prepare_call(f, qualname, args, kwargs, ctx)
+
+  # Bad: duplicated fingerprint logic in both sync_wrapper and async_wrapper
+  ```
+- **Pass data explicitly**: Prefer passing values as parameters over reaching into shared state.
+  ```python
+  # Good: caller scopes the stubs and passes them
+  _emit_record(..., inner_stubs=inner_stubs)
+
+  # Bad: function reaches into ctx.collected_stubs and clears it
+  ```
+
+### Memory safety
+
+- **No unbounded growth**: Dicts and lists that grow per-request must have a `reset()` path.
+- **No monkey-patching**: Use proper dataclass fields instead of `setattr()` on objects at runtime.
+  ```python
+  # Good: declared field
+  @dataclass
+  class SimContext:
+      trace_depth: int = 0
+
+  # Bad: dynamic attribute
+  ctx._trace_depth = getattr(ctx, "_trace_depth", 0) + 1
+  ```
+- **Scope resources with try/finally**: Especially `collected_stubs` — use snapshot/slice to scope per trace level.
+  ```python
+  stubs_snapshot = len(ctx.collected_stubs)
+  try:
+      output = f(*args, **kwargs)
+  finally:
+      inner_stubs = list(ctx.collected_stubs[stubs_snapshot:])
+      del ctx.collected_stubs[stubs_snapshot:]
+  ```
+
+### Error handling
+
+- **Custom exceptions with diagnostics**: Include enough context to debug.
+  ```python
+  class SimStubMissError(Exception):
+      def __init__(self, qualname, input_fingerprint, ordinal, stub_dir=None):
+          # Include qualname, fingerprint, ordinal, and expected file path
+  ```
+- **Never swallow exceptions silently**: Log or re-raise.
+
+### Testing
+
+- **Each test class maps to one acceptance criterion** (e.g., `TestRecordMode`, `TestReplayMode`).
+- **Tests are independent**: Each test creates its own context via fixtures. No shared mutable state between tests.
+- **Use `autouse=True` clean_context fixture** to reset the ContextVar between tests.
+- **Test the boundary**: Zero-dependency tests scan source for banned imports.
+
+---
+
+## 8. Architecture Principles
 
 1. **The SDK is a library of primitives** — not a framework, not middleware
 2. **Consumers integrate the SDK** — the SDK never integrates itself into consumers
