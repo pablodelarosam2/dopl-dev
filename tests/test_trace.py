@@ -23,14 +23,41 @@ from pathlib import Path
 import pytest
 
 from sim_sdk.context import SimContext, SimMode, get_context, set_context, clear_context
+from sim_sdk.fixture.schema import FixtureEvent
+from sim_sdk.sink import RecordSink
 from sim_sdk.trace import (
     sim_trace,
     SimStubMissError,
-    FixtureEvent,
     _compute_fingerprint,
     _fixture_key,
     _make_serializable,
 )
+
+
+# ---------------------------------------------------------------------------
+# Test sink — writes FixtureEvents to a directory so replay can read them
+# ---------------------------------------------------------------------------
+
+class StubDirSink(RecordSink):
+    """Minimal sink for tests: writes fixture events as JSON files to stub_dir.
+
+    max_batch_events=1 so every event is persisted immediately without
+    waiting for a batch to fill up.
+    """
+
+    def __init__(self, stub_dir: Path):
+        super().__init__(max_batch_events=1)
+        self.stub_dir = stub_dir
+        self.events: list[FixtureEvent] = []
+
+    def _persist_batch(self, batch: list[FixtureEvent]) -> None:
+        for event in batch:
+            self.events.append(event)
+            key = _fixture_key(event.qualname, event.input_fingerprint, event.ordinal)
+            filepath = self.stub_dir / key
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(event.to_dict(), f, indent=2, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -54,8 +81,9 @@ def stub_dir():
 
 
 def make_record_ctx(stub_dir: Path) -> SimContext:
-    """Create a record-mode context pointing at stub_dir."""
-    ctx = SimContext(mode=SimMode.RECORD, run_id="test-run", stub_dir=stub_dir)
+    """Create a record-mode context with a StubDirSink."""
+    sink = StubDirSink(stub_dir)
+    ctx = SimContext(mode=SimMode.RECORD, run_id="test-run", stub_dir=stub_dir, sink=sink)
     set_context(ctx)
     return ctx
 
@@ -185,8 +213,8 @@ class TestRecordMode:
         assert "RuntimeError" in data["error"]
         assert "bad input: 42" in data["error"]
 
-    def test_no_sink_no_stub_dir(self):
-        """When neither sink nor stub_dir is set, fixture is silently discarded."""
+    def test_no_sink_configured(self):
+        """When no sink is set, fixture is silently discarded."""
         ctx = SimContext(mode=SimMode.RECORD, run_id="test")
         set_context(ctx)
 
@@ -194,7 +222,6 @@ class TestRecordMode:
         def add(a, b):
             return a + b
 
-        # Should not raise
         result = add(2, 3)
         assert result == 5
 

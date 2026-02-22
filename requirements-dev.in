@@ -1,0 +1,17 @@
+# Development and test dependencies for the dopl-dev workspace.
+# These are NOT part of the sim_sdk package — they are only needed to run
+# the test suite in tests/.
+#
+# Install with:
+#   pip install -r requirements-dev.txt
+#
+# To regenerate requirements-dev.txt from this file:
+#   pip install pip-tools
+#   pip-compile requirements-dev.in
+
+# Test runner
+pytest>=7.0
+pytest-cov
+
+# Async test support (required for @pytest.mark.asyncio tests in test_capture / test_db)
+pytest-asyncio>=0.23

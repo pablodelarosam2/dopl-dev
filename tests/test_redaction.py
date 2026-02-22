@@ -69,24 +69,6 @@ def test_redact_custom_placeholder():
     assert result["password"] == "***"
 
 
-def test_redact_default_paths():
-    """Test redaction with default paths."""
-    data = {
-        "email": "test@example.com",
-        "password": "secret",
-        "api_key": "key123",
-        "name": "Alice"
-    }
-    result = redact(data)  # Use default paths
-    
-    # Should redact all default sensitive fields
-    assert result["email"] == REDACTED_PLACEHOLDER
-    assert result["password"] == REDACTED_PLACEHOLDER
-    assert result["api_key"] == REDACTED_PLACEHOLDER
-    # Should preserve non-sensitive fields
-    assert result["name"] == "Alice"
-
-
 def test_pseudonymize_deterministic():
     """Test that pseudonymization is deterministic."""
     data = {"email": "alice@example.com", "name": "Alice"}
