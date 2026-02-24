@@ -15,11 +15,14 @@ Write detection: INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE → SimWriteBlockedErr
 import json
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .context import SimContext, SimMode, get_context
 from .canonical import normalize_sql, fingerprint, fingerprint_sql
+from .fixture.schema import FixtureEvent
 from .trace import SimStubMissError, _make_serializable
 
 logger = logging.getLogger(__name__)
@@ -106,24 +109,34 @@ def _write_db_fixture(
     ctx: SimContext,
 ) -> None:
     """Persist a DB query fixture to sink or stub_dir."""
-    data = {
-        "type": "db_query",
-        "name": name,
-        "sql": sql,
-        "params": _make_serializable(params),
-        "sql_fingerprint": sql_fp,
-        "params_fingerprint": params_fp,
-        "ordinal": ordinal,
-        "result": _make_serializable(result),
-    }
-
     key = _db_fixture_key(name, sql_fp, params_fp, ordinal)
 
     if ctx.sink is not None:
-        ctx.sink.write(key, data)
+        event = FixtureEvent(
+            fixture_id=str(uuid.uuid4())[:8],
+            qualname=f"db:{name}",
+            run_id=ctx.run_id,
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            input={"sql": sql, "params": _make_serializable(params)},
+            input_fingerprint=f"{sql_fp[:16]}:{params_fp[:16]}",
+            output=_make_serializable(result),
+            ordinal=ordinal,
+            storage_key=key,
+        )
+        ctx.sink.emit(event)
         return
 
     if ctx.stub_dir is not None:
+        data = {
+            "type": "db_query",
+            "name": name,
+            "sql": sql,
+            "params": _make_serializable(params),
+            "sql_fingerprint": sql_fp,
+            "params_fingerprint": params_fp,
+            "ordinal": ordinal,
+            "result": _make_serializable(result),
+        }
         filepath = ctx.stub_dir / key
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:

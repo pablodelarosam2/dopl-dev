@@ -1,0 +1,20 @@
+{
+  "type": "db_query",
+  "name": "products_db",
+  "sql": "SELECT sku, name, price FROM products WHERE sku IN ($1)",
+  "params": [
+    [
+      "WIDGET-A"
+    ]
+  ],
+  "sql_fingerprint": "5f9bbe600f2b9e27",
+  "params_fingerprint": "f914e76e5dfbf99a",
+  "ordinal": 0,
+  "result": [
+    {
+      "sku": "WIDGET-A",
+      "name": "Premium Widget",
+      "price": 29.99
+    }
+  ]
+}

@@ -712,8 +712,8 @@ class TestRoundtrip:
 class TestSinkIntegration:
     """Record mode uses ctx.sink when available."""
 
-    def test_record_writes_to_sink(self, stub_dir):
-        """When ctx.sink is set, DB fixtures are written to sink."""
+    def test_record_emits_to_sink(self, stub_dir):
+        """When ctx.sink is set, DB fixtures are emitted as FixtureEvents."""
         stub_dir.mkdir(parents=True, exist_ok=True)
         mock_sink = MagicMock()
         ctx = SimContext(
@@ -727,13 +727,13 @@ class TestSinkIntegration:
         with sim_db(fake, name="pg") as sdb:
             sdb.query("SELECT 1")
 
-        mock_sink.write.assert_called_once()
-        call_args = mock_sink.write.call_args
-        key = call_args[0][0]
-        data = call_args[0][1]
-        assert key.startswith("__db__/pg_")
-        assert data["type"] == "db_query"
-        assert data["result"] == [{"one": 1}]
+        # Sink.emit() should have been called (not write())
+        mock_sink.emit.assert_called_once()
+        event = mock_sink.emit.call_args[0][0]
+        assert event.storage_key.startswith("__db__/pg_")
+        assert event.qualname == "db:pg"
+        assert event.output == [{"one": 1}]
+        assert event.input["sql"] == "SELECT 1"
 
 
 # ===========================================================================

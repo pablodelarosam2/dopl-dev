@@ -546,8 +546,8 @@ class TestCaptureKey:
 class TestSinkIntegration:
     """Record mode uses ctx.sink when available."""
 
-    def test_record_writes_to_sink(self, stub_dir):
-        """When ctx.sink is set, capture writes to sink instead of disk."""
+    def test_record_emits_to_sink(self, stub_dir):
+        """When ctx.sink is set, capture emits a FixtureEvent to the buffer."""
         stub_dir.mkdir(parents=True, exist_ok=True)
         mock_sink = MagicMock()
         ctx = SimContext(
@@ -558,10 +558,10 @@ class TestSinkIntegration:
         with sim_capture("via_sink") as cap:
             cap.set_result({"routed": True})
 
-        # Sink should have been called
-        mock_sink.write.assert_called_once()
-        call_args = mock_sink.write.call_args
-        key = call_args[0][0]
-        data = call_args[0][1]
-        assert "__capture__/via_sink_0.json" == key
-        assert data["result"] == {"routed": True}
+        # Sink.emit() should have been called (not write())
+        mock_sink.emit.assert_called_once()
+        event = mock_sink.emit.call_args[0][0]
+        assert event.storage_key == "__capture__/via_sink_0.json"
+        assert event.qualname == "capture:via_sink"
+        assert event.output == {"routed": True}
+        assert event.ordinal == 0

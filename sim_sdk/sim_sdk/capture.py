@@ -17,10 +17,13 @@ Supports both sync (`with`) and async (`async with`) context managers.
 
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .context import SimContext, SimMode, get_context
+from .fixture.schema import FixtureEvent
 from .trace import SimStubMissError, _make_serializable
 
 logger = logging.getLogger(__name__)
@@ -42,19 +45,28 @@ def _capture_key(label: str, ordinal: int) -> str:
 
 def _write_capture(label: str, ordinal: int, result: Any, ctx: SimContext) -> None:
     """Persist a capture result to sink or stub_dir."""
-    data = {
-        "type": "capture",
-        "label": label,
-        "ordinal": ordinal,
-        "result": _make_serializable(result),
-    }
+    key = _capture_key(label, ordinal)
 
     if ctx.sink is not None:
-        ctx.sink.write(_capture_key(label, ordinal), data)
+        event = FixtureEvent(
+            fixture_id=str(uuid.uuid4())[:8],
+            qualname=f"capture:{label}",
+            run_id=ctx.run_id,
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            output=_make_serializable(result),
+            ordinal=ordinal,
+            storage_key=key,
+        )
+        ctx.sink.emit(event)
         return
 
     if ctx.stub_dir is not None:
-        key = _capture_key(label, ordinal)
+        data = {
+            "type": "capture",
+            "label": label,
+            "ordinal": ordinal,
+            "result": _make_serializable(result),
+        }
         filepath = ctx.stub_dir / key
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:

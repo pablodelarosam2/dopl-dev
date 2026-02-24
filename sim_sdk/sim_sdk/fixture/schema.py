@@ -27,6 +27,7 @@ class FixtureEvent:
     duration_ms: float = 0.0
     error: Optional[str] = None
     ordinal: int = 0
+    storage_key: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -42,4 +43,5 @@ class FixtureEvent:
             "duration_ms": self.duration_ms,
             "error": self.error,
             "ordinal": self.ordinal,
+            "storage_key": self.storage_key,
         }

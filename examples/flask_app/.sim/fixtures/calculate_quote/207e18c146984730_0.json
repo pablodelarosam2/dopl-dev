@@ -1,0 +1,78 @@
+{
+  "fixture_id": "943bbb9e",
+  "qualname": "calculate_quote",
+  "run_id": "demo-run",
+  "recorded_at": "2026-02-24T06:06:37.391096+00:00",
+  "input": {
+    "user_id": 1,
+    "items": [
+      {
+        "sku": "WIDGET-A",
+        "qty": 2
+      }
+    ]
+  },
+  "input_fingerprint": "207e18c14698473002f2b2102cb33b3703a41cd5e620250bae001ad133dce89d",
+  "output": {
+    "user_id": 1,
+    "items": [
+      {
+        "sku": "WIDGET-A",
+        "name": "Premium Widget",
+        "qty": 2,
+        "unit_price": 29.99,
+        "line_total": 59.98
+      }
+    ],
+    "subtotal": 59.98,
+    "tax_rate": 0.0725,
+    "tax_region": "US-CA",
+    "tax": 4.35,
+    "total": 64.33
+  },
+  "output_fingerprint": "b7d2b568cee4f36013fd7452c5593d2b8a3fbd3bf05e8d053ed0c416d742d493",
+  "stubs": [
+    {
+      "type": "db_query",
+      "name": "products_db",
+      "sql": "SELECT sku, name, price FROM products WHERE sku IN ($1)",
+      "ordinal": 0,
+      "result": [
+        {
+          "sku": "WIDGET-A",
+          "name": "Premium Widget",
+          "price": 29.99
+        }
+      ],
+      "source": "record"
+    },
+    {
+      "type": "db_query",
+      "name": "tax_db",
+      "sql": "SELECT region FROM users WHERE id = $1",
+      "ordinal": 0,
+      "result": [
+        {
+          "id": 1,
+          "name": "Alice Johnson",
+          "email": "alice@example.com",
+          "region": "US-CA"
+        }
+      ],
+      "source": "record"
+    },
+    {
+      "type": "capture",
+      "label": "tax_service_lookup",
+      "ordinal": 0,
+      "result": {
+        "region": "US-CA",
+        "rate": 0.0725
+      }
+    }
+  ],
+  "duration_ms": 2.29,
+  "error": null,
+  "ordinal": 0,
+  "storage_key": null
+}

@@ -1,0 +1,9 @@
+{
+  "type": "capture",
+  "label": "tax_service_lookup",
+  "ordinal": 0,
+  "result": {
+    "region": "US-CA",
+    "rate": 0.0725
+  }
+}
