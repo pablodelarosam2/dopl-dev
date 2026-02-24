@@ -1,0 +1,34 @@
+name: Agent CI
+
+on:
+  push:
+    paths:
+      - "agent/**"
+      - ".github/workflows/agent_ci.yml"
+  pull_request:
+    paths:
+      - "agent/**"
+      - ".github/workflows/agent_ci.yml"
+
+jobs:
+  build-and-test:
+    name: go build & test
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: agent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...

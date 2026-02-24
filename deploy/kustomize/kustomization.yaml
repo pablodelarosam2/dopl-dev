@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# TODO: reference rendered Helm templates or raw manifests once finalized.
+resources: []
+# - ../helm/record-agent/templates/daemonset.yaml
+# - ../helm/record-agent/templates/service.yaml
+# - ../helm/record-agent/templates/configmap.yaml
+# - ../helm/record-agent/templates/rbac.yaml
+# - ../helm/record-agent/templates/serviceaccount.yaml

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "record-agent.fullname" . }}
+  labels:
+    app: {{ include "record-agent.name" . }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ include "record-agent.name" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "record-agent.name" . }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: record-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.health.port }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: spool
+              mountPath: /var/spool/dopl
+      volumes:
+        - name: spool
+          hostPath:
+            path: {{ .Values.spool.hostPath }}
+            type: DirectoryOrCreate

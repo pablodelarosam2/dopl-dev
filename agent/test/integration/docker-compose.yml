@@ -1,0 +1,10 @@
+version: "3.9"
+
+services:
+  record-agent:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    # TODO: add environment variables, volume mounts, and port mappings.
+
+  # TODO: add a localstack service for S3 once the uploader is implemented.

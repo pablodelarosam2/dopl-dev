@@ -1,0 +1,16 @@
+# Pod-level security context applied to the DaemonSet pod template.
+# Enforce least-privilege defaults; tighten per security review.
+#
+# NOTE: PodSecurityPolicy is deprecated in Kubernetes 1.21+ and removed in 1.25.
+# Use PodSecurity admission labels on the namespace instead:
+#
+#   kubectl label namespace <ns> \
+#     pod-security.kubernetes.io/enforce=restricted \
+#     pod-security.kubernetes.io/enforce-version=latest
+#
+# The securityContext stanza below is embedded directly in the DaemonSet
+# template (see daemonset.yaml). This file serves as documentation and a
+# placeholder for any supplemental PSA / OPA policies added later.
+
+# TODO: add OPA/Gatekeeper ConstraintTemplate or Kyverno policy once the
+# security posture is defined.

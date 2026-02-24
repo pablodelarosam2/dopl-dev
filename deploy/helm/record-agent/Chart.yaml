@@ -1,0 +1,6 @@
+apiVersion: v2
+name: record-agent
+description: DaemonSet agent that spools sim_sdk fixture data to disk and uploads to S3.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

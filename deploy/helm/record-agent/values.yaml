@@ -1,0 +1,34 @@
+image:
+  repository: ghcr.io/dopl-dev/record-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Resource requests and limits — tune per node capacity.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Spool directory on the host node.
+spool:
+  hostPath: /var/lib/dopl/spool
+
+# S3 upload target (Phase 2+).
+s3:
+  bucket: ""
+  region: us-east-1
+
+# Health probe ports.
+health:
+  port: 8080
+
+# Metrics (Prometheus).
+metrics:
+  port: 9090
+  enabled: true
+
+serviceAccount:
+  name: record-agent

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "record-agent.fullname" . }}
+  labels:
+    app: {{ include "record-agent.name" . }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "record-agent.name" . }}
+  ports:
+    - name: health
+      port: {{ .Values.health.port }}
+      targetPort: health
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
