@@ -10,5 +10,15 @@
 package main
 
 func main() {
-	// TODO: wire up config, ingest, session, spool, uploader, metrics, health.
+	// Load configuration
+	config := config.NewConfig()
+	// Start the ingest server
+	ingest.Start(config)
+	// Manage per-request session lifecycle
+	session.Start(config)
+	// Spool the records to disk
+	spool.Start(config)
+	// Upload the completed session bundles to S3
+	uploader.Start(config)
+	health.Start(config)
 }
