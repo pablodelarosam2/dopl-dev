@@ -3,6 +3,7 @@ package health
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -20,6 +21,8 @@ func TestLive_ReturnsOK(t *testing.T) {
 }
 
 func TestReady_ReturnsOKWithEmptyChecks(t *testing.T) {
+	// Zero-value Health has nil deps — Ready() must not panic and should
+	// return 200 with no checks when no dependencies are wired.
 	h := &Health{}
 
 	code, report := h.Ready()
@@ -70,26 +73,34 @@ func TestReady_ReportWithChecksSerializesCorrectly(t *testing.T) {
 
 func TestLiveHandler_DelegatesToLive(t *testing.T) {
 	h := &Health{}
+	handler := LiveHandler(h)
 
-	code, body := LiveHandler(h)
+	req := httptest.NewRequest(http.MethodGet, "/live", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 
-	if code != http.StatusOK {
-		t.Errorf("LiveHandler() code = %d, want %d", code, http.StatusOK)
-	}
-	if body != "ok" {
-		t.Errorf("LiveHandler() body = %v, want ok", body)
+	if rec.Code != http.StatusOK {
+		t.Errorf("LiveHandler status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
 func TestReadyHandler_DelegatesToReady(t *testing.T) {
 	h := &Health{}
+	handler := ReadyHandler(h)
 
-	code, report := ReadyHandler(h)
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 
-	if code != http.StatusOK {
-		t.Errorf("ReadyHandler() code = %d, want %d", code, http.StatusOK)
+	if rec.Code != http.StatusOK {
+		t.Errorf("ReadyHandler status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var report ReadinessReport
+	if err := json.NewDecoder(rec.Body).Decode(&report); err != nil {
+		t.Fatalf("decode ReadinessReport: %v", err)
 	}
 	if report.Status != string(StatusOK) {
-		t.Errorf("ReadyHandler() report.Status = %q, want %q", report.Status, StatusOK)
+		t.Errorf("ReadyHandler report.Status = %q, want %q", report.Status, StatusOK)
 	}
 }

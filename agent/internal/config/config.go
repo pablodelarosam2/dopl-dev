@@ -90,6 +90,7 @@ func Load() (*Config, error) {
         MaxSessionAge:     time.Duration(parseInt64("AGENT_MAX_SESSION_AGE_MS", 60000)) * time.Millisecond,
 
         MaxEventBytes:   parseInt64("AGENT_MAX_EVENT_BYTES", 256*1024),
+        MaxBatchBytes:   parseInt64("AGENT_MAX_BATCH_BYTES", 10*1024*1024),
         IngestQueueSize: int(parseInt64("AGENT_INGEST_QUEUE_SIZE", 10000)),
 
         FlushInterval: time.Duration(parseInt64("AGENT_FLUSH_INTERVAL_MS", 2000)) * time.Millisecond,
