@@ -46,11 +46,20 @@ type SessionStatus interface {
 	MaxActiveSessions() int
 }
 
+// UploaderStatus is optional; pass nil when the uploader is not enabled.
+type UploaderStatus interface {
+	Running() bool
+	UploadsCompleted() int64
+	UploadsFailed() int64
+	LastError() string
+}
+
 // Deps bundles the status providers injected into Health.
 type Deps struct {
-	Ingest  IngestStatus
-	Spool   SpoolStatus
-	Session SessionStatus // may be nil
+	Ingest   IngestStatus
+	Spool    SpoolStatus
+	Session  SessionStatus  // may be nil
+	Uploader UploaderStatus // may be nil
 }
 
 // Config controls the thresholds at which checks flip to degraded.
@@ -63,19 +72,21 @@ type Config struct {
 
 // Health evaluates liveness and readiness probes.
 type Health struct {
-	ingest  IngestStatus
-	spool   SpoolStatus
-	session SessionStatus
-	cfg     Config
+	ingest   IngestStatus
+	spool    SpoolStatus
+	session  SessionStatus
+	uploader UploaderStatus
+	cfg      Config
 }
 
 // New constructs a Health with the provided dependency and threshold config.
 func New(deps Deps, cfg Config) *Health {
 	return &Health{
-		ingest:  deps.Ingest,
-		spool:   deps.Spool,
-		session: deps.Session,
-		cfg:     cfg,
+		ingest:   deps.Ingest,
+		spool:    deps.Spool,
+		session:  deps.Session,
+		uploader: deps.Uploader,
+		cfg:      cfg,
 	}
 }
 
@@ -153,6 +164,31 @@ func (h *Health) Ready() (code int, report ReadinessReport) {
 			overallOK = false
 		} else {
 			checks = append(checks, CheckResult{Name: "session_pressure", Status: StatusOK})
+		}
+	}
+
+	// --- uploader (optional) ---
+	if h.uploader != nil {
+		if !h.uploader.Running() {
+			msg := h.uploader.LastError()
+			if msg == "" {
+				msg = "uploader not running"
+			}
+			checks = append(checks, CheckResult{
+				Name:    "uploader",
+				Status:  StatusDegraded,
+				Message: msg,
+			})
+			overallOK = false
+		} else if lastErr := h.uploader.LastError(); lastErr != "" {
+			checks = append(checks, CheckResult{
+				Name:    "uploader",
+				Status:  StatusDegraded,
+				Message: lastErr,
+			})
+			overallOK = false
+		} else {
+			checks = append(checks, CheckResult{Name: "uploader", Status: StatusOK})
 		}
 	}
 
