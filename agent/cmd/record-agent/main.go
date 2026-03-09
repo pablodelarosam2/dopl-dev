@@ -1,10 +1,11 @@
 // record-agent is the entrypoint for the dopl DaemonSet agent.
 //
-// Phase 1 responsibilities:
+// Responsibilities:
 //   - Load configuration from environment variables.
 //   - Initialise the disk spool (create dir, recover stale tmp dirs, scan bytes).
 //   - Build the ingest pipeline (validator → queue → ingestor).
 //   - Start the session manager worker (reads queue, commits bundles to spool).
+//   - Optionally start the S3 uploader (when AGENT_S3_BUCKET is set).
 //   - Serve HTTP on cfg.ListenAddress: POST /v1/events, GET /live, GET /ready.
 //   - Shutdown gracefully on SIGTERM / SIGINT.
 package main
@@ -21,12 +22,16 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/dopl-dev/agent/internal/config"
 	"github.com/dopl-dev/agent/internal/health"
 	"github.com/dopl-dev/agent/internal/ingest"
 	"github.com/dopl-dev/agent/internal/logging"
 	"github.com/dopl-dev/agent/internal/session"
 	"github.com/dopl-dev/agent/internal/spool"
+	"github.com/dopl-dev/agent/internal/uploader"
 )
 
 func main() {
@@ -87,23 +92,66 @@ func main() {
 		log,
 	)
 
-	// ── 6. Build health ──────────────────────────────────────────────────────
+	// ── 6. Build uploader (optional) ────────────────────────────────────────
+	var up *uploader.Uploader
+	if cfg.S3Bucket != "" {
+		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+			awsconfig.WithRegion(cfg.S3Region),
+		)
+		if err != nil {
+			log.Error("failed to load AWS config", "error", err)
+			os.Exit(1)
+		}
+		s3Client := s3.NewFromConfig(awsCfg)
+
+		up, err = uploader.New(
+			&s3ClientAdapter{client: s3Client, bucket: cfg.S3Bucket},
+			sp,
+			uploader.UploaderConfig{
+				Bucket:       cfg.S3Bucket,
+				Region:       cfg.S3Region,
+				Prefix:       cfg.S3Prefix,
+				Workers:      cfg.UploadWorkers,
+				ScanInterval: cfg.UploadInterval,
+				MaxRetries:   cfg.UploadMaxRetries,
+			},
+			log,
+		)
+		if err != nil {
+			log.Error("uploader initialisation failed", "error", err)
+			os.Exit(1)
+		}
+		log.Info("uploader configured",
+			"bucket", cfg.S3Bucket,
+			"region", cfg.S3Region,
+			"prefix", cfg.S3Prefix,
+			"workers", cfg.UploadWorkers,
+		)
+	} else {
+		log.Info("uploader disabled (AGENT_S3_BUCKET not set)")
+	}
+
+	// ── 7. Build health ─────────────────────────────────────────────────────
 	// *spool.Spool exposes health stats via Stats(), not via direct interface
 	// methods. The thin adapter below bridges the two without modifying the
 	// spool package.
+	healthDeps := health.Deps{
+		Ingest:  ingestor,
+		Spool:   &spoolHealthAdapter{sp: sp},
+		Session: sessionMgr,
+	}
+	if up != nil {
+		healthDeps.Uploader = up
+	}
 	h := health.New(
-		health.Deps{
-			Ingest:  ingestor,
-			Spool:   &spoolHealthAdapter{sp: sp},
-			Session: sessionMgr,
-		},
+		healthDeps,
 		health.Config{
 			QueuePct: 0.9,
 			SpoolPct: 0.9,
 		},
 	)
 
-	// ── 7. Start session worker ──────────────────────────────────────────────
+	// ── 8. Start session worker ──────────────────────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -113,7 +161,18 @@ func main() {
 		sessionMgr.Run(ctx, ingestor.Events())
 	}()
 
-	// ── 8. Start HTTP server ─────────────────────────────────────────────────
+	// ── 8b. Start uploader (if configured) ──────────────────────────────────
+	uploaderDone := make(chan struct{})
+	if up != nil {
+		go func() {
+			defer close(uploaderDone)
+			up.Run(ctx)
+		}()
+	} else {
+		close(uploaderDone)
+	}
+
+	// ── 9. Start HTTP server ─────────────────────────────────────────────────
 	router := buildRouter(ingestor, h, cfg, log)
 	srv := &http.Server{
 		Addr:         cfg.ListenAddress,
@@ -131,7 +190,7 @@ func main() {
 		}
 	}()
 
-	// ── 9. Wait for shutdown signal ──────────────────────────────────────────
+	// ── 10. Wait for shutdown signal ─────────────────────────────────────────
 	select {
 	case sig := <-waitForShutdown():
 		log.Info("shutdown signal received", "signal", sig.String())
@@ -139,7 +198,7 @@ func main() {
 		log.Error("HTTP server fatal error", "error", err)
 	}
 
-	// ── 10. Graceful shutdown ────────────────────────────────────────────────
+	// ── 11. Graceful shutdown ────────────────────────────────────────────────
 	log.Info("shutting down")
 
 	// Stop accepting new HTTP requests (10 s drain window).
@@ -149,8 +208,18 @@ func main() {
 		log.Warn("HTTP server shutdown error", "error", err)
 	}
 
-	// Cancel the session worker context so Run() exits and calls flushAll().
+	// Cancel the shared context so all background workers begin draining.
 	cancel()
+
+	// Wait for uploader to drain in-flight uploads (15 s deadline).
+	select {
+	case <-uploaderDone:
+		log.Info("uploader stopped")
+	case <-time.After(15 * time.Second):
+		log.Warn("uploader did not stop within deadline")
+	}
+
+	// Wait for session worker to flush remaining sessions (15 s deadline).
 	select {
 	case <-workerDone:
 		log.Info("session worker stopped")
@@ -288,3 +357,21 @@ func (a *spoolHealthAdapter) SpoolBytes() int64    { return a.sp.Stats().SpoolBy
 func (a *spoolHealthAdapter) MaxSpoolBytes() int64 { return a.sp.Stats().MaxSpoolBytes }
 func (a *spoolHealthAdapter) Writable() bool       { return a.sp.Stats().Writable }
 func (a *spoolHealthAdapter) LastError() string    { return a.sp.Stats().LastError }
+
+// s3ClientAdapter bridges *s3.Client to uploader.S3Client. The bucket is
+// baked in at construction time so individual PutObject calls only carry the
+// key and body.
+type s3ClientAdapter struct {
+	client *s3.Client
+	bucket string
+}
+
+func (a *s3ClientAdapter) PutObject(ctx context.Context, params *uploader.PutObjectInput) error {
+	_, err := a.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      &a.bucket,
+		Key:         &params.Key,
+		Body:        params.Body,
+		ContentType: &params.ContentType,
+	})
+	return err
+}

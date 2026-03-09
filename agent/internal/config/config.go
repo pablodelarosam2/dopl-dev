@@ -24,6 +24,14 @@ type Config struct {
     // General
     FlushInterval   time.Duration
     LogLevel        string
+
+    // S3 Uploader (Phase 2). Uploader starts only when S3Bucket is non-empty.
+    S3Bucket         string
+    S3Region         string
+    S3Prefix         string
+    UploadWorkers    int
+    UploadInterval   time.Duration
+    UploadMaxRetries int
 }
 
 func getEnv(key, defaultValue string) string {
@@ -75,6 +83,22 @@ func (c *Config) Validate() error {
         return errors.New("max active sessions must be > 0")
     }
 
+    // S3 uploader fields are only validated when the bucket is configured.
+    if c.S3Bucket != "" {
+        if c.S3Region == "" {
+            return errors.New("S3 region must not be empty when S3 bucket is set")
+        }
+        if c.UploadWorkers <= 0 {
+            return errors.New("upload workers must be > 0")
+        }
+        if c.UploadInterval <= 0 {
+            return errors.New("upload interval must be > 0")
+        }
+        if c.UploadMaxRetries <= 0 {
+            return errors.New("upload max retries must be > 0")
+        }
+    }
+
     return nil
 }
 
@@ -96,6 +120,13 @@ func Load() (*Config, error) {
         FlushInterval: time.Duration(parseInt64("AGENT_FLUSH_INTERVAL_MS", 2000)) * time.Millisecond,
 
         LogLevel: getEnv("AGENT_LOG_LEVEL", "info"),
+
+        S3Bucket:         getEnv("AGENT_S3_BUCKET", ""),
+        S3Region:         getEnv("AGENT_S3_REGION", "us-east-1"),
+        S3Prefix:         getEnv("AGENT_S3_PREFIX", ""),
+        UploadWorkers:    parseInt("AGENT_UPLOAD_WORKERS", 4),
+        UploadInterval:   parseDuration("AGENT_UPLOAD_INTERVAL", 5*time.Second),
+        UploadMaxRetries: parseInt("AGENT_UPLOAD_MAX_RETRIES", 3),
     }
 
     if err := cfg.Validate(); err != nil {
