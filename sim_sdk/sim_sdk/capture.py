@@ -56,6 +56,7 @@ def _write_capture(label: str, ordinal: int, result: Any, ctx: SimContext) -> No
             output=_make_serializable(result),
             ordinal=ordinal,
             storage_key=key,
+            event_type="Stub",
         )
         ctx.sink.emit(event)
         return

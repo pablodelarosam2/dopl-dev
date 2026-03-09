@@ -122,6 +122,7 @@ def _write_db_fixture(
             output=_make_serializable(result),
             ordinal=ordinal,
             storage_key=key,
+            event_type="Stub",
         )
         ctx.sink.emit(event)
         return

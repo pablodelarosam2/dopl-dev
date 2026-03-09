@@ -200,6 +200,7 @@ def _emit_record(
         duration_ms=round(duration_ms, 2),
         error=error_msg,
         ordinal=ordinal,
+        event_type="Output",
     )
 
     if ctx.sink is not None:

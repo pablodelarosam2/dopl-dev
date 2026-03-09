@@ -1,198 +1,109 @@
 """
-Manual Flask integration test for sim_sdk Phase 1 primitives.
+Flask integration demo for sim_sdk with AgentSink transport.
 
-Demonstrates all three SDK primitives in a real Flask application:
-- @sim_trace   — function-level record/replay
-- sim_capture  — transport-agnostic dependency capture
-- sim_db       — database query capture
+Exercises all three SDK primitives against real SQLite and a mocked
+external tax service, sending recorded events to the local record-agent
+via the AgentSink background sender.
+
+Endpoints:
+    POST /quote   — @sim_trace + sim_db (read+write) + sim_capture
+    GET  /health  — plain health-check showing mode + metrics
 
 Usage:
-    SIM_MODE=record python3 app.py   # Record fixtures to .sim/fixtures/
-    SIM_MODE=replay python3 app.py   # Replay from recorded fixtures
-    python3 app.py                    # Off mode (normal execution)
+    # 1. Start the record-agent (in another terminal)
+    # 2. Start this app in record mode:
+    SIM_MODE=record python3 app.py
+
+    # 3. Hit the endpoint:
+    curl -s -X POST http://localhost:5050/quote \
+      -H "Content-Type: application/json" \
+      -d '{"user_id": 1, "items": [{"sku": "WIDGET-A", "qty": 2}]}'
 """
 
+import atexit
 import json
 import os
+import sqlite3
+import uuid
 from pathlib import Path
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, jsonify, request
 
 from sim_sdk.context import SimContext, SimMode, set_context, clear_context, get_context
-from sim_sdk.trace import sim_trace, _fixture_key
+from sim_sdk.trace import sim_trace
 from sim_sdk.capture import sim_capture
 from sim_sdk.db import sim_db
-from sim_sdk.sink import RecordSink
-from sim_sdk.fixture.schema import FixtureEvent
+from sim_sdk.sink.agent_sink import AgentSink
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-STUB_DIR = Path(".sim/fixtures")
 SIM_MODE_STR = os.environ.get("SIM_MODE", "off").lower()
+AGENT_URL = os.environ.get("DOPL_AGENT_URL", "http://127.0.0.1:7777")
+SERVICE_NAME = os.environ.get("DOPL_SERVICE", "flask-demo")
+STUB_DIR = Path(".sim/fixtures")
+DB_PATH = os.environ.get("DB_PATH", ":memory:")
 
 
 # ---------------------------------------------------------------------------
-# PrintSink — demo sink that prints and writes fixture files
+# SQLiteDB — thin wrapper giving sim_db the .query()/.execute() interface
 # ---------------------------------------------------------------------------
 
-class PrintSink(RecordSink):
-    """Sink that prints every recorded artifact and writes it to disk.
+class SQLiteDB:
+    """Real SQLite database with the .query()/.execute() contract sim_db expects."""
 
-    Handles both sink protocols used by the SDK:
-    - emit(event)      — called by @sim_trace (inherited from RecordSink)
-    - write(key, data) — called by sim_capture() and sim_db()
-    """
+    def __init__(self, db_path: str = ":memory:"):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._seed()
 
-    def __init__(self, stub_dir: Path):
-        super().__init__(max_batch_events=1)  # Flush after every emit
-        self.stub_dir = stub_dir
-        self.stub_dir.mkdir(parents=True, exist_ok=True)
+    def query(self, sql: str, params=None):
+        cur = self.conn.cursor()
+        cur.execute(sql, params or [])
+        if cur.description is None:
+            return []
+        columns = [d[0] for d in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
 
-    def emit(self, event: FixtureEvent) -> None:
-        """Override to log buffer activity before delegating to RecordSink."""
-        buf = self._buffer
-        print(f"\n[BUFFER] emit() called — buffer size BEFORE: {len(buf.buffer)}")
-        print(f"  event.qualname: {event.qualname}")
-        print(f"  event.input_fp: {event.input_fingerprint[:16]}...")
-        super().emit(event)  # appends to buffer, then flushes if batch full
-        print(f"[BUFFER] emit() done  — buffer size AFTER:  {len(buf.buffer)}")
+    def execute(self, sql: str, params=None):
+        cur = self.conn.cursor()
+        cur.execute(sql, params or [])
+        self.conn.commit()
+        return {"rowcount": cur.rowcount, "lastrowid": cur.lastrowid}
 
-    def flush(self) -> None:
-        """Override to log drain activity."""
-        buf = self._buffer
-        count = len(buf.buffer)
-        if count > 0:
-            print(f"\n[BUFFER] flush() draining {count} event(s) from buffer...")
-        super().flush()
-        if count > 0:
-            print(f"[BUFFER] flush() complete — buffer empty: {len(buf.buffer) == 0}")
+    def _seed(self):
+        cur = self.conn.cursor()
+        cur.executescript("""
+            CREATE TABLE IF NOT EXISTS products (
+                sku   TEXT PRIMARY KEY,
+                name  TEXT NOT NULL,
+                price REAL NOT NULL
+            );
+            INSERT OR IGNORE INTO products VALUES ('WIDGET-A', 'Premium Widget', 29.99);
+            INSERT OR IGNORE INTO products VALUES ('GADGET-B', 'Super Gadget',   49.99);
+            INSERT OR IGNORE INTO products VALUES ('TOOL-C',   'Pro Tool',       19.99);
 
-    def _persist_batch(self, batch: list) -> None:
-        """Called by RecordSink.emit() -> flush() for ALL event types.
+            CREATE TABLE IF NOT EXISTS users (
+                id     INTEGER PRIMARY KEY,
+                name   TEXT NOT NULL,
+                email  TEXT NOT NULL,
+                region TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO users VALUES (1, 'Alice Johnson', 'alice@example.com', 'US-CA');
+            INSERT OR IGNORE INTO users VALUES (2, 'Bob Smith',     'bob@example.com',   'US-NY');
 
-        All three primitives (@sim_trace, sim_capture, sim_db) now flow
-        through emit() → buffer → _persist_batch(). Events with a
-        storage_key use that as the file path; otherwise we compute
-        from _fixture_key().
-        """
-        print(f"[BUFFER] _persist_batch() received {len(batch)} event(s) to write to disk")
-        for event in batch:
-            if event.storage_key:
-                key = event.storage_key
-            else:
-                key = _fixture_key(event.qualname, event.input_fingerprint, event.ordinal)
-
-            filepath = self.stub_dir / key
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-
-            if event.storage_key and event.qualname.startswith("capture:"):
-                # Capture events: write the replay-compatible format
-                label = event.qualname.removeprefix("capture:")
-                data = {
-                    "type": "capture",
-                    "label": label,
-                    "ordinal": event.ordinal,
-                    "result": event.output,
-                }
-            elif event.storage_key and event.qualname.startswith("db:"):
-                # DB events: write the replay-compatible format
-                name = event.qualname.removeprefix("db:")
-                data = {
-                    "type": "db_query",
-                    "name": name,
-                    "sql": event.input.get("sql", ""),
-                    "params": event.input.get("params"),
-                    "sql_fingerprint": event.input_fingerprint.split(":")[0] if ":" in event.input_fingerprint else event.input_fingerprint,
-                    "params_fingerprint": event.input_fingerprint.split(":")[1] if ":" in event.input_fingerprint else "",
-                    "ordinal": event.ordinal,
-                    "result": event.output,
-                }
-            else:
-                # @sim_trace events: write the full event dict
-                data = event.to_dict()
-
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, default=str)
-
-            print(f"\n{'='*60}")
-            print(f"[SINK] {event.qualname} fixture recorded")
-            print(f"  storage_key: {event.storage_key or '(computed)'}")
-            print(f"  ordinal:     {event.ordinal}")
-            print(f"  file:        {filepath}")
-            if event.input:
-                input_preview = json.dumps(event.input, default=str)[:80]
-                print(f"  input:       {input_preview}")
-            if event.output is not None:
-                output_preview = json.dumps(event.output, default=str)[:80]
-                print(f"  output:      {output_preview}")
-            print(f"{'='*60}")
-
-
-# ---------------------------------------------------------------------------
-# FakeDB — in-memory database for the demo (no real driver needed)
-# ---------------------------------------------------------------------------
-
-class FakeDB:
-    """In-memory fake database with .query() and .execute() methods.
-
-    Pre-loaded with users, products, and tax_rates tables.
-    Prints every query for visibility during the demo.
-    """
-
-    def __init__(self):
-        self.tables = {
-            "users": [
-                {"id": 1, "name": "Alice Johnson", "email": "alice@example.com", "region": "US-CA"},
-                {"id": 2, "name": "Bob Smith", "email": "bob@example.com", "region": "US-NY"},
-            ],
-            "products": [
-                {"sku": "WIDGET-A", "name": "Premium Widget", "price": 29.99},
-                {"sku": "GADGET-B", "name": "Super Gadget", "price": 49.99},
-                {"sku": "TOOL-C", "name": "Pro Tool", "price": 19.99},
-            ],
-            "tax_rates": [
-                {"region": "US-CA", "rate": 0.0725},
-                {"region": "US-NY", "rate": 0.08875},
-            ],
-        }
-
-    def query(self, sql, params=None):
-        """Simple pattern-matching query — enough for the demo."""
-        print(f"  [FakeDB] query: {sql}")
-        if params:
-            print(f"  [FakeDB] params: {params}")
-
-        if "FROM products WHERE sku" in sql and params:
-            skus = params[0] if isinstance(params, (list, tuple)) else [params]
-            if isinstance(skus, (list, tuple)):
-                rows = [p for p in self.tables["products"] if p["sku"] in skus]
-            else:
-                rows = [p for p in self.tables["products"] if p["sku"] == skus]
-            print(f"  [FakeDB] -> {len(rows)} row(s)")
-            return rows
-
-        if "FROM users WHERE id" in sql and params:
-            user_id = params[0] if isinstance(params, (list, tuple)) else params
-            rows = [u for u in self.tables["users"] if u["id"] == user_id]
-            print(f"  [FakeDB] -> {len(rows)} row(s)")
-            return rows
-
-        if "FROM tax_rates WHERE region" in sql and params:
-            region = params[0] if isinstance(params, (list, tuple)) else params
-            rows = [t for t in self.tables["tax_rates"] if t["region"] == region]
-            print(f"  [FakeDB] -> {len(rows)} row(s)")
-            return rows
-
-        print(f"  [FakeDB] -> no matching pattern, returning []")
-        return []
-
-    def execute(self, sql, params=None):
-        """Execute a write statement (not used in this demo)."""
-        print(f"  [FakeDB] execute: {sql}")
-        return None
+            CREATE TABLE IF NOT EXISTS quotes (
+                quote_id   TEXT PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                subtotal   REAL NOT NULL,
+                tax        REAL NOT NULL,
+                total      REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        self.conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +111,16 @@ class FakeDB:
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
-fake_db = FakeDB()
-sink = PrintSink(STUB_DIR) if SIM_MODE_STR == "record" else None
+db = SQLiteDB(DB_PATH)
+
+sink = None
+if SIM_MODE_STR == "record":
+    sink = AgentSink(
+        agent_url=AGENT_URL,
+        service=SERVICE_NAME,
+        flush_interval_s=0.5,
+        max_batch_events=50,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,63 +129,47 @@ sink = PrintSink(STUB_DIR) if SIM_MODE_STR == "record" else None
 
 @app.before_request
 def before_sim():
-    """Initialize SimContext for each incoming request."""
     mode = SimMode(SIM_MODE_STR)
     ctx = SimContext(
         mode=mode,
         run_id="demo-run",
-        stub_dir=STUB_DIR if mode != SimMode.OFF else None,
+        stub_dir=STUB_DIR if mode == SimMode.REPLAY else None,
         sink=sink,
     )
-    request_id = ctx.start_new_request()
+    ctx.start_new_request()
     set_context(ctx)
-
-    print(f"\n{'#'*60}")
-    print(f"[REQUEST] {request.method} {request.path}")
-    print(f"  mode:       {mode.value}")
-    print(f"  request_id: {request_id}")
-    print(f"  stub_dir:   {STUB_DIR}")
-    print(f"{'#'*60}")
 
 
 @app.after_request
 def after_sim(response):
-    """Clean up SimContext and flush sink after each request."""
-    ctx = get_context()
-    print(f"\n[RESPONSE] status={response.status_code}")
-    print(f"  collected_stubs: {len(ctx.collected_stubs)}")
-
-    if sink is not None:
-        sink.flush()
-
     clear_context()
     return response
 
 
 # ---------------------------------------------------------------------------
-# Business logic — decorated with SDK primitives
+# Business logic
 # ---------------------------------------------------------------------------
 
 @sim_trace
-def calculate_quote(user_id, items):
-    """Core business logic: calculate a price quote.
+def calculate_quote(user_id: int, items: list):
+    """Core business logic: look up products, get tax, persist quote.
 
-    Uses sim_db() for database queries and sim_capture() for an
-    external tax service call. All interactions are recorded/replayed.
+    Exercises:
+      - sim_db  read  (products lookup)
+      - sim_capture   (external tax service mock)
+      - sim_db  write (INSERT quote row)
     """
-    print(f"\n  [LOGIC] calculate_quote(user_id={user_id}, items={items})")
-
-    # 1. Query product prices from DB
     skus = [item["sku"] for item in items]
-    with sim_db(fake_db, name="products_db") as db:
-        products = db.query(
-            "SELECT sku, name, price FROM products WHERE sku IN ($1)",
-            [skus],
+    placeholders = ",".join("?" for _ in skus)
+
+    with sim_db(db, name="products") as sdb:
+        products = sdb.query(
+            f"SELECT sku, name, price FROM products WHERE sku IN ({placeholders})",
+            skus,
         )
 
     product_map = {p["sku"]: p for p in products}
 
-    # 2. Build line items
     line_items = []
     subtotal = 0.0
     for item in items:
@@ -284,25 +187,30 @@ def calculate_quote(user_id, items):
             "line_total": line_total,
         })
 
-    # 3. Look up tax rate via "external service" (sim_capture)
-    with sim_capture("tax_service_lookup") as cap:
+    with sim_capture("tax_service") as cap:
         if not cap.replaying:
-            print("  [LOGIC] Calling external tax service...")
-            with sim_db(fake_db, name="tax_db") as db:
-                user_rows = db.query(
-                    "SELECT region FROM users WHERE id = $1",
+            with sim_db(db, name="users") as sdb:
+                rows = sdb.query(
+                    "SELECT region FROM users WHERE id = ?",
                     [user_id],
                 )
-            region = user_rows[0]["region"] if user_rows else "US-CA"
+            region = rows[0]["region"] if rows else "US-CA"
             tax_rate = {"US-CA": 0.0725, "US-NY": 0.08875}.get(region, 0.0)
             cap.set_result({"region": region, "rate": tax_rate})
         tax_info = cap.result
 
-    # 4. Calculate totals
     tax = round(subtotal * tax_info["rate"], 2)
     total = round(subtotal + tax, 2)
+    quote_id = str(uuid.uuid4())[:8]
 
-    result = {
+    with sim_db(db, name="quotes") as sdb:
+        sdb.execute(
+            "INSERT INTO quotes (quote_id, user_id, subtotal, tax, total) VALUES (?, ?, ?, ?, ?)",
+            [quote_id, user_id, subtotal, tax, total],
+        )
+
+    return {
+        "quote_id": quote_id,
         "user_id": user_id,
         "items": line_items,
         "subtotal": round(subtotal, 2),
@@ -311,42 +219,25 @@ def calculate_quote(user_id, items):
         "tax": tax,
         "total": total,
     }
-    print(f"  [LOGIC] Quote total: ${total}")
-    return result
-
-
-@sim_trace
-def get_user_info(user_id):
-    """Look up user information from the database."""
-    print(f"\n  [LOGIC] get_user_info(user_id={user_id})")
-
-    with sim_db(fake_db, name="users_db") as db:
-        rows = db.query(
-            "SELECT id, name, email, region FROM users WHERE id = $1",
-            [user_id],
-        )
-
-    if not rows:
-        return None
-    return rows[0]
 
 
 # ---------------------------------------------------------------------------
-# Flask routes
+# Routes
 # ---------------------------------------------------------------------------
 
 @app.route("/health")
 def health():
-    """Health check — shows current SIM_MODE."""
+    metrics = sink.metrics.snapshot() if sink else {}
     return jsonify({
         "status": "ok",
         "sim_mode": SIM_MODE_STR,
+        "agent_url": AGENT_URL,
+        "sender_metrics": metrics,
     })
 
 
 @app.route("/quote", methods=["POST"])
 def quote():
-    """Calculate a price quote (exercises all 3 SDK primitives)."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "JSON body required"}), 400
@@ -362,13 +253,17 @@ def quote():
     return jsonify(result)
 
 
-@app.route("/user/<int:user_id>")
-def user(user_id):
-    """Get user info (exercises @sim_trace + sim_db)."""
-    result = get_user_info(user_id)
-    if result is None:
-        return jsonify({"error": "User not found"}), 404
-    return jsonify(result)
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+def _shutdown():
+    if sink is not None:
+        print(f"\n[SHUTDOWN] Flushing AgentSink — {sink.metrics}")
+        sink.close()
+
+
+atexit.register(_shutdown)
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +271,10 @@ def user(user_id):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"[APP] Starting Flask demo app")
-    print(f"[APP] SIM_MODE:  {SIM_MODE_STR}")
-    print(f"[APP] STUB_DIR:  {STUB_DIR}")
-    print(f"[APP] Sink:      {'PrintSink' if sink else 'None (off/replay mode)'}")
+    print(f"[APP] SIM_MODE:   {SIM_MODE_STR}")
+    print(f"[APP] AGENT_URL:  {AGENT_URL}")
+    print(f"[APP] SERVICE:    {SERVICE_NAME}")
+    print(f"[APP] DB_PATH:    {DB_PATH}")
+    print(f"[APP] Sink:       {'AgentSink' if sink else 'None'}")
     print()
-    app.run(port=int(os.environ.get("PORT", "5000")), debug=False)
+    app.run(port=int(os.environ.get("PORT", "5050")), debug=False)

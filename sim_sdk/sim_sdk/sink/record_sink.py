@@ -37,7 +37,7 @@ class RecordSink(ABC):
 
     def emit(self, event: FixtureEvent) -> None:
         self._buffer.append(event)
-        if len(self._buffer.buffer) >= self._max_batch_events:
+        if len(self._buffer) >= self._max_batch_events:
             self.flush()
 
     def flush(self) -> None:

@@ -22,8 +22,8 @@ from .canonical import (
 )
 from .config import SimConfig, load_config
 from .redaction import redact, pseudonymize, create_redactor, create_pseudonymizer
-from .sink import RecordSink
-from .fixture.schema import FixtureEvent
+from .sink import RecordSink, AgentSink, AgentHttpClient, SenderMetrics
+from .fixture import FixtureEvent
 
 __version__ = "0.1.0"
 
@@ -60,6 +60,9 @@ __all__ = [
     "create_pseudonymizer",
     # Sinks
     "RecordSink",
+    "AgentSink",
+    "AgentHttpClient",
+    "SenderMetrics",
     # Fixtures
     "FixtureEvent",
 ]
