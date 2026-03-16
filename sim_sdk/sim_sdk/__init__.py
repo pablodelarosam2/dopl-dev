@@ -16,6 +16,7 @@ from .stub_store import StubStore
 from .replay_context import ReplayContext, get_replay_context, set_replay_context, clear_replay_context
 from .capture import sim_capture, CaptureHandle
 from .db import sim_db, SimWriteBlockedError, DBProxy
+from .http import sim_http, HTTPProxy, FakeResponse, HTTPError, normalize_url
 from .canonical import (
     canonicalize_json,
     fingerprint,
@@ -48,6 +49,11 @@ __all__ = [
     "sim_db",
     "SimWriteBlockedError",
     "DBProxy",
+    "sim_http",
+    "HTTPProxy",
+    "FakeResponse",
+    "HTTPError",
+    "normalize_url",
     # Canonicalization & Fingerprinting
     "canonicalize_json",
     "fingerprint",

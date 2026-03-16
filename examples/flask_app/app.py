@@ -1,20 +1,26 @@
 """
-Flask integration demo for sim_sdk with AgentSink transport.
+Flask integration demo for sim_sdk — all four primitives in one flow.
 
-Exercises all three SDK primitives against real SQLite and a mocked
-external tax service, sending recorded events to the local record-agent
-via the AgentSink background sender.
+Exercises every SDK primitive inside a single calculate_quote() call:
+    @sim_trace  — function-level record/replay (wraps the whole function)
+    sim_db      — database capture (products lookup, quote insert)
+    sim_capture — transport-agnostic capture (tax rate computation)
+    sim_http    — HTTP request capture (external shipping rate API)
 
 Endpoints:
-    POST /quote   — @sim_trace + sim_db (read+write) + sim_capture
-    GET  /health  — plain health-check showing mode + metrics
+    POST /quote   — @sim_trace + sim_db + sim_capture + sim_http
+    GET  /health  — health-check showing mode + metrics
 
 Usage:
     # 1. Start the record-agent (in another terminal)
-    # 2. Start this app in record mode:
+    # 2. Record mode — fixtures written to .sim/fixtures/
     SIM_MODE=record python3 app.py
+    curl -s -X POST http://localhost:5050/quote \
+      -H "Content-Type: application/json" \
+      -d '{"user_id": 1, "items": [{"sku": "WIDGET-A", "qty": 2}]}'
 
-    # 3. Hit the endpoint:
+    # 3. Replay mode — same response, zero I/O
+    SIM_MODE=replay python3 app.py
     curl -s -X POST http://localhost:5050/quote \
       -H "Content-Type: application/json" \
       -d '{"user_id": 1, "items": [{"sku": "WIDGET-A", "qty": 2}]}'
@@ -33,7 +39,8 @@ from sim_sdk.context import SimContext, SimMode, set_context, clear_context, get
 from sim_sdk.trace import sim_trace
 from sim_sdk.capture import sim_capture
 from sim_sdk.db import sim_db
-from sim_sdk.sink.agent_sink import AgentSink
+from sim_sdk.http import sim_http
+from sim_sdk.sink.record_sink import RecordSink
 
 
 # ---------------------------------------------------------------------------
@@ -41,10 +48,83 @@ from sim_sdk.sink.agent_sink import AgentSink
 # ---------------------------------------------------------------------------
 
 SIM_MODE_STR = os.environ.get("SIM_MODE", "off").lower()
-AGENT_URL = os.environ.get("DOPL_AGENT_URL", "http://127.0.0.1:7777")
 SERVICE_NAME = os.environ.get("DOPL_SERVICE", "flask-demo")
 STUB_DIR = Path(".sim/fixtures")
 DB_PATH = os.environ.get("DB_PATH", ":memory:")
+
+
+# ---------------------------------------------------------------------------
+# LocalFileSink — writes FixtureEvents to stub_dir as JSON files
+# ---------------------------------------------------------------------------
+
+class LocalFileSink(RecordSink):
+    """Minimal sink that writes @sim_trace fixture events to disk.
+
+    File layout matches what trace._read_fixture() expects:
+        stub_dir/{qualname}/{input_fp[:16]}_{ordinal}.json
+    """
+
+    def __init__(self, stub_dir: Path):
+        super().__init__(max_batch_events=1)
+        self._stub_dir = stub_dir
+
+    def _persist_batch(self, batch):
+        for event in batch:
+            safe_qualname = event.qualname.replace(".", "_")
+            filename = f"{event.input_fingerprint[:16]}_{event.ordinal}.json"
+            dirpath = self._stub_dir / safe_qualname
+            dirpath.mkdir(parents=True, exist_ok=True)
+            filepath = dirpath / filename
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(event.to_dict(), f, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# ShippingClient — mock HTTP client for sim_http demo
+# ---------------------------------------------------------------------------
+
+class ShippingResponse:
+    """Response-like object that sim_http can duck-type extract."""
+
+    def __init__(self, status_code: int, data: dict):
+        self.status_code = status_code
+        self._data = data
+        self.headers = {"content-type": "application/json"}
+
+    @property
+    def text(self) -> str:
+        return json.dumps(self._data)
+
+    def json(self):
+        return self._data
+
+
+class ShippingClient:
+    """Simulates calling https://api.shipping.example.com/v1/rate.
+
+    Duck-typed HTTP client with .get() — works with sim_http without
+    importing requests or httpx.
+    """
+
+    def get(self, url, **kwargs):
+        payload = kwargs.get("json", {})
+        region = payload.get("region", "US")
+        total_weight = payload.get("total_weight", 1)
+
+        rate_per_unit = 2.99
+        surcharges = {"US-AK": 5.00, "US-HI": 5.00}
+        surcharge = surcharges.get(region, 0.0)
+        cost = round(rate_per_unit * total_weight + surcharge, 2)
+
+        if total_weight >= 10:
+            cost = 0.0
+
+        return ShippingResponse(200, {
+            "cost": cost,
+            "region": region,
+            "total_weight": total_weight,
+            "carrier": "USPS",
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -112,15 +192,12 @@ class SQLiteDB:
 
 app = Flask(__name__)
 db = SQLiteDB(DB_PATH)
+shipping_client = ShippingClient()
 
 sink = None
 if SIM_MODE_STR == "record":
-    sink = AgentSink(
-        agent_url=AGENT_URL,
-        service=SERVICE_NAME,
-        flush_interval_s=0.5,
-        max_batch_events=50,
-    )
+    STUB_DIR.mkdir(parents=True, exist_ok=True)
+    sink = LocalFileSink(stub_dir=STUB_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +210,7 @@ def before_sim():
     ctx = SimContext(
         mode=mode,
         run_id="demo-run",
-        stub_dir=STUB_DIR if mode == SimMode.REPLAY else None,
+        stub_dir=STUB_DIR if mode in (SimMode.RECORD, SimMode.REPLAY) else None,
         sink=sink,
     )
     ctx.start_new_request()
@@ -152,12 +229,13 @@ def after_sim(response):
 
 @sim_trace
 def calculate_quote(user_id: int, items: list):
-    """Core business logic: look up products, get tax, persist quote.
+    """Core business logic: look up products, get tax, get shipping, persist quote.
 
-    Exercises:
-      - sim_db  read  (products lookup)
-      - sim_capture   (external tax service mock)
-      - sim_db  write (INSERT quote row)
+    Exercises all four primitives:
+      - sim_db      read   (products + users lookup)
+      - sim_capture        (tax rate computation — local side effect)
+      - sim_http           (external shipping rate API — HTTP call)
+      - sim_db      write  (INSERT quote row)
     """
     skus = [item["sku"] for item in items]
     placeholders = ",".join("?" for _ in skus)
@@ -200,7 +278,17 @@ def calculate_quote(user_id: int, items: list):
         tax_info = cap.result
 
     tax = round(subtotal * tax_info["rate"], 2)
-    total = round(subtotal + tax, 2)
+
+    # --- sim_http: external shipping rate API --------------------------
+    total_qty = sum(item.get("qty", 1) for item in items)
+    with sim_http(shipping_client, name="shipping") as client:
+        ship_resp = client.get(
+            "https://api.shipping.example.com/v1/rate",
+            json={"region": tax_info["region"], "total_weight": total_qty},
+        )
+    shipping = ship_resp.json().get("cost", 0.0)
+
+    total = round(subtotal + tax + shipping, 2)
     quote_id = str(uuid.uuid4())[:8]
 
     with sim_db(db, name="quotes") as sdb:
@@ -217,6 +305,7 @@ def calculate_quote(user_id: int, items: list):
         "tax_rate": tax_info["rate"],
         "tax_region": tax_info["region"],
         "tax": tax,
+        "shipping": shipping,
         "total": total,
     }
 
@@ -227,12 +316,11 @@ def calculate_quote(user_id: int, items: list):
 
 @app.route("/health")
 def health():
-    metrics = sink.metrics.snapshot() if sink else {}
     return jsonify({
         "status": "ok",
         "sim_mode": SIM_MODE_STR,
-        "agent_url": AGENT_URL,
-        "sender_metrics": metrics,
+        "stub_dir": str(STUB_DIR),
+        "sink": type(sink).__name__ if sink else "None",
     })
 
 
@@ -259,7 +347,7 @@ def quote():
 
 def _shutdown():
     if sink is not None:
-        print(f"\n[SHUTDOWN] Flushing AgentSink — {sink.metrics}")
+        print("\n[SHUTDOWN] Flushing sink")
         sink.close()
 
 
@@ -272,9 +360,9 @@ atexit.register(_shutdown)
 
 if __name__ == "__main__":
     print(f"[APP] SIM_MODE:   {SIM_MODE_STR}")
-    print(f"[APP] AGENT_URL:  {AGENT_URL}")
     print(f"[APP] SERVICE:    {SERVICE_NAME}")
+    print(f"[APP] STUB_DIR:   {STUB_DIR}")
     print(f"[APP] DB_PATH:    {DB_PATH}")
-    print(f"[APP] Sink:       {'AgentSink' if sink else 'None'}")
+    print(f"[APP] Sink:       {type(sink).__name__ if sink else 'None'}")
     print()
     app.run(port=int(os.environ.get("PORT", "5050")), debug=False)
