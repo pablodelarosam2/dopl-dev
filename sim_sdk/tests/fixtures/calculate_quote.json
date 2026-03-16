@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "fixture_id": "c02d07d9",
+  "session_id": "demo-run",
+  "created_at_ms": 1773016821281,
+  "service": "flask-demo",
+  "stubs": [
+    {
+      "fixture_id": "c02d07d9",
+      "qualname": "db:products",
+      "run_id": "demo-run",
+      "recorded_at": "2026-03-09T00:40:21.245972+00:00",
+      "input": {
+        "sql": "SELECT sku, name, price FROM products WHERE sku IN (?,?)",
+        "params": [
+          "WIDGET-A",
+          "GADGET-B"
+        ]
+      },
+      "input_fingerprint": "2c2c6f4f7f54aad7:fd5c81b9314f2dba",
+      "output": [
+        {
+          "sku": "GADGET-B",
+          "name": "Super Gadget",
+          "price": 49.99
+        },
+        {
+          "sku": "WIDGET-A",
+          "name": "Premium Widget",
+          "price": 29.99
+        }
+      ],
+      "output_fingerprint": "",
+      "stubs": [],
+      "duration_ms": 0,
+      "error": null,
+      "ordinal": 0,
+      "storage_key": "__db__/products_2c2c6f4f_fd5c81b9_0.json",
+      "event_type": "Stub"
+    },
+    {
+      "fixture_id": "bb7fbf2e",
+      "qualname": "db:users",
+      "run_id": "demo-run",
+      "recorded_at": "2026-03-09T00:40:21.246747+00:00",
+      "input": {
+        "sql": "SELECT region FROM users WHERE id = ?",
+        "params": [
+          1
+        ]
+      },
+      "input_fingerprint": "8e2da4922ec2cc96:080a9ed428559ef6",
+      "output": [
+        {
+          "region": "US-CA"
+        }
+      ],
+      "output_fingerprint": "",
+      "stubs": [],
+      "duration_ms": 0,
+      "error": null,
+      "ordinal": 0,
+      "storage_key": "__db__/users_8e2da492_080a9ed4_0.json",
+      "event_type": "Stub"
+    },
+    {
+      "fixture_id": "2073ff5c",
+      "qualname": "capture:tax_service",
+      "run_id": "demo-run",
+      "recorded_at": "2026-03-09T00:40:21.246778+00:00",
+      "input": {},
+      "input_fingerprint": "",
+      "output": {
+        "region": "US-CA",
+        "rate": 0.0725
+      },
+      "output_fingerprint": "",
+      "stubs": [],
+      "duration_ms": 0,
+      "error": null,
+      "ordinal": 0,
+      "storage_key": "__capture__/tax_service_0.json",
+      "event_type": "Stub"
+    },
+    {
+      "fixture_id": "ff4be8e9",
+      "qualname": "db:quotes",
+      "run_id": "demo-run",
+      "recorded_at": "2026-03-09T00:40:21.248087+00:00",
+      "input": {
+        "sql": "INSERT INTO quotes (quote_id, user_id, subtotal, tax, total) VALUES (?, ?, ?, ?, ?)",
+        "params": [
+          "9d631d23",
+          1,
+          109.97,
+          7.97,
+          117.94
+        ]
+      },
+      "input_fingerprint": "023d3a8283aba4ca:c7317460ab436af4",
+      "output": {
+        "rowcount": 1,
+        "lastrowid": 1
+      },
+      "output_fingerprint": "",
+      "stubs": [],
+      "duration_ms": 0,
+      "error": null,
+      "ordinal": 0,
+      "storage_key": "__db__/quotes_023d3a82_c7317460_0.json",
+      "event_type": "Stub"
+    }
+  ],
+  "golden_output": {
+    "fixture_id": "56d62b37",
+    "qualname": "calculate_quote",
+    "run_id": "demo-run",
+    "recorded_at": "2026-03-09T00:40:21.248150+00:00",
+    "input": {
+      "user_id": 1,
+      "items": [
+        {
+          "sku": "WIDGET-A",
+          "qty": 2
+        },
+        {
+          "sku": "GADGET-B",
+          "qty": 1
+        }
+      ]
+    },
+    "input_fingerprint": "77646bc6050bcb8b1021261c093e131af2238521d4a4c975aaad0a979970837c",
+    "output": {
+      "quote_id": "9d631d23",
+      "user_id": 1,
+      "items": [
+        {
+          "sku": "WIDGET-A",
+          "name": "Premium Widget",
+          "qty": 2,
+          "unit_price": 29.99,
+          "line_total": 59.98
+        },
+        {
+          "sku": "GADGET-B",
+          "name": "Super Gadget",
+          "qty": 1,
+          "unit_price": 49.99,
+          "line_total": 49.99
+        }
+      ],
+      "subtotal": 109.97,
+      "tax_rate": 0.0725,
+      "tax_region": "US-CA",
+      "tax": 7.97,
+      "total": 117.94
+    },
+    "output_fingerprint": "687120483060cdc5290e47ec9b60d29a63832fc2916899616d6f2f6afedab075",
+    "stubs": [
+      {
+        "type": "db_query",
+        "name": "products",
+        "sql": "SELECT sku, name, price FROM products WHERE sku IN (?,?)",
+        "ordinal": 0,
+        "result": [
+          {
+            "sku": "GADGET-B",
+            "name": "Super Gadget",
+            "price": 49.99
+          },
+          {
+            "sku": "WIDGET-A",
+            "name": "Premium Widget",
+            "price": 29.99
+          }
+        ],
+        "source": "record"
+      },
+      {
+        "type": "db_query",
+        "name": "users",
+        "sql": "SELECT region FROM users WHERE id = ?",
+        "ordinal": 0,
+        "result": [
+          {
+            "region": "US-CA"
+          }
+        ],
+        "source": "record"
+      },
+      {
+        "type": "capture",
+        "label": "tax_service",
+        "ordinal": 0,
+        "result": {
+          "region": "US-CA",
+          "rate": 0.0725
+        }
+      },
+      {
+        "type": "db_query",
+        "name": "quotes",
+        "sql": "INSERT INTO quotes (quote_id, user_id, subtotal, tax, total) VALUES (?, ?, ?, ?, ?)",
+        "ordinal": 0,
+        "result": {
+          "rowcount": 1,
+          "lastrowid": 1
+        },
+        "source": "record"
+      }
+    ],
+    "duration_ms": 4.28,
+    "error": null,
+    "ordinal": 0,
+    "storage_key": null,
+    "event_type": "Output"
+  }
+}

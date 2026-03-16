@@ -25,48 +25,12 @@ from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 from .context import SimContext, SimMode, get_context
 from .canonical import canonicalize_json, fingerprint
+from .errors import SimStubMissError
 from .fixture.schema import FixtureEvent
 
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
-
-
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-class SimStubMissError(Exception):
-    """Raised when replay mode cannot find a matching recorded fixture.
-
-    Attributes:
-        qualname: Fully-qualified function name.
-        input_fingerprint: SHA-256 fingerprint of the input args.
-        ordinal: Call ordinal (0-based) for repeated calls with same fingerprint.
-        stub_dir: Path where fixture was expected.
-    """
-
-    def __init__(
-        self,
-        qualname: str,
-        input_fingerprint: str,
-        ordinal: int,
-        stub_dir: Optional[Path] = None,
-    ):
-        self.qualname = qualname
-        self.input_fingerprint = input_fingerprint
-        self.ordinal = ordinal
-        self.stub_dir = stub_dir
-
-        msg = (
-            f"No recorded fixture for {qualname} "
-            f"(fingerprint={input_fingerprint[:16]}, ordinal={ordinal})"
-        )
-        if stub_dir is not None:
-            expected = stub_dir / _fixture_key(qualname, input_fingerprint, ordinal)
-            msg += f"\n  Expected at: {expected}"
-
-        super().__init__(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +115,11 @@ def _replay(
 ) -> Any:
     """Look up recorded fixture and return its output."""
     if ctx.stub_dir is None:
-        raise SimStubMissError(qualname, input_fp, ordinal)
+        raise SimStubMissError("trace", input_fp, ordinal, [])
 
     fixture_data = _read_fixture(qualname, input_fp, ordinal, ctx.stub_dir)
     if fixture_data is None:
-        raise SimStubMissError(qualname, input_fp, ordinal, ctx.stub_dir)
+        raise SimStubMissError("trace", input_fp, ordinal, [])
 
     output = fixture_data.get("output")
 

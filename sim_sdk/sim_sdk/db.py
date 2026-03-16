@@ -22,8 +22,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .context import SimContext, SimMode, get_context
 from .canonical import normalize_sql, fingerprint, fingerprint_sql
+from .errors import SimStubMissError
 from .fixture.schema import FixtureEvent
-from .trace import SimStubMissError, _make_serializable
+from .trace import _make_serializable
 
 logger = logging.getLogger(__name__)
 
@@ -238,13 +239,11 @@ class DBProxy:
             raise SimWriteBlockedError(sql, name)
 
         if ctx.stub_dir is None:
-            raise SimStubMissError(f"db:{name}", f"{sql_fp[:16]}:{params_fp[:16]}", ordinal)
+            raise SimStubMissError("db", f"{sql_fp[:16]}:{params_fp[:16]}", ordinal, [])
 
         fixture = _read_db_fixture(name, sql_fp, params_fp, ordinal, ctx.stub_dir)
         if fixture is None:
-            raise SimStubMissError(
-                f"db:{name}", f"{sql_fp[:16]}:{params_fp[:16]}", ordinal, ctx.stub_dir,
-            )
+            raise SimStubMissError("db", f"{sql_fp[:16]}:{params_fp[:16]}", ordinal, [])
 
         result = fixture.get("result")
 

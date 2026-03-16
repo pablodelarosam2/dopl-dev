@@ -2,6 +2,13 @@
 // variables and an optional config file.
 package config
 
+import (
+	"errors"
+	"os"
+	"strconv"
+	"time"
+)
+
 type Config struct {
     // Server
     ListenAddress string        // e.g. "127.0.0.1:7777"

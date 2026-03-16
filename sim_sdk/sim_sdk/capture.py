@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .context import SimContext, SimMode, get_context
+from .errors import SimStubMissError
 from .fixture.schema import FixtureEvent
-from .trace import SimStubMissError, _make_serializable
+from .trace import _make_serializable
 
 logger = logging.getLogger(__name__)
 
@@ -113,15 +114,11 @@ class CaptureHandle:
     def _load_recorded(self) -> None:
         """Load the recorded value from stub_dir during replay."""
         if self._ctx.stub_dir is None:
-            raise SimStubMissError(
-                f"capture:{self._label}", "", self._ordinal,
-            )
+            raise SimStubMissError("capture", self._label, self._ordinal, [])
 
         data = _read_capture(self._label, self._ordinal, self._ctx.stub_dir)
         if data is None:
-            raise SimStubMissError(
-                f"capture:{self._label}", "", self._ordinal, self._ctx.stub_dir,
-            )
+            raise SimStubMissError("capture", self._label, self._ordinal, [])
 
         self._result = data.get("result")
         self._result_set = True
