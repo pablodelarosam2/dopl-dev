@@ -13,6 +13,7 @@ from .context import SimContext, SimMode, get_context, set_context, clear_contex
 from .errors import SimStubMissError
 from .trace import sim_trace
 from .stub_store import StubStore
+from .replay_context import ReplayContext, get_replay_context, set_replay_context, clear_replay_context
 from .capture import sim_capture, CaptureHandle
 from .db import sim_db, SimWriteBlockedError, DBProxy
 from .canonical import (
