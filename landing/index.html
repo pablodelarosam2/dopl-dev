@@ -158,6 +158,55 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
+    /* ── Primitives Tabs ── */
+    .primitives { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .primitives h2 { text-align: center; font-size: 2rem; margin-bottom: 0.5rem; }
+    .primitives .subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 2.5rem; }
+    [role="tablist"] {
+      display: flex; gap: 0; border-bottom: 1px solid var(--border);
+      margin-bottom: 2rem;
+    }
+    [role="tab"] {
+      background: none; border: none; border-bottom: 2px solid transparent;
+      color: var(--text-secondary); font-family: var(--font-code);
+      padding: 0.75rem 1.25rem; cursor: pointer; font-size: 0.95rem;
+    }
+    [role="tab"][aria-selected="true"] {
+      color: var(--text-primary); border-bottom-color: var(--accent-blue);
+    }
+    [role="tab"]:hover { color: var(--text-primary); }
+    [role="tab"]:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+    [role="tabpanel"] { display: none; }
+    [role="tabpanel"].active { display: block; }
+    .tab-description { margin-bottom: 1.25rem; font-size: 1.05rem; }
+    .tab-code {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      overflow-x: auto;
+      font-family: var(--font-code);
+      font-size: 0.85rem;
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    .mode-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    .mode-grid .mode-label {
+      font-family: var(--font-code);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+    .mode-grid .mode-record .mode-label { color: var(--accent-green); }
+    .mode-grid .mode-replay .mode-label { color: var(--accent-blue); }
+    .mode-grid p { font-size: 0.9rem; color: var(--text-secondary); }
+
     /* ── Problem Statement ── */
     .problem { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
     .problem h2 { text-align: center; font-size: 2rem; margin-bottom: 0.75rem; }
@@ -199,6 +248,23 @@
       .hero h1 { font-size: 2.25rem; }
       .hero .subtitle { font-size: 1.05rem; }
       .subscribe-form { flex-direction: column; }
+      [role="tablist"] { display: none; }
+      [role="tabpanel"] {
+        display: block !important;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 2rem;
+        margin-bottom: 2rem;
+      }
+      [role="tabpanel"]::before {
+        content: attr(aria-label);
+        display: block;
+        font-family: var(--font-code);
+        font-weight: 600;
+        color: var(--accent-blue);
+        margin-bottom: 1rem;
+        font-size: 1rem;
+      }
+      .mode-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -248,7 +314,65 @@
   </section>
 
   <!-- Section 3: How It Works — Primitives -->
-  <section id="primitives"></section>
+  <section id="primitives" class="primitives">
+    <h2>How it works</h2>
+    <p class="subtitle">Four composable primitives that record and replay any side effect.</p>
+
+    <div role="tablist" aria-label="dopl primitives">
+      <button role="tab" id="tab-trace" aria-controls="panel-trace" aria-selected="true">@sim_trace</button>
+      <button role="tab" id="tab-capture" aria-controls="panel-capture" aria-selected="false">sim_capture()</button>
+      <button role="tab" id="tab-db" aria-controls="panel-db" aria-selected="false">sim_db()</button>
+      <button role="tab" id="tab-http" aria-controls="panel-http" aria-selected="false">sim_http()</button>
+    </div>
+
+    <div role="tabpanel" id="panel-trace" aria-label="@sim_trace" aria-labelledby="tab-trace" class="active">
+      <p class="tab-description">Wrap any function to record its inputs and outputs. On replay, the function body is skipped entirely.</p>
+      <pre class="tab-code"><code><span class="dec">@sim_trace</span>
+<span class="kw">def</span> <span class="fn">calculate_quote</span>(user_id, items):
+    <span class="cm"># In record: executes normally, captures result</span>
+    <span class="cm"># In replay: returns recorded result, body never runs</span>
+    <span class="kw">return</span> {<span class="str">"total"</span>: <span class="num">99.50</span>, <span class="str">"tax"</span>: <span class="num">8.25</span>}</code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>Executes function, captures {inputs → output} as a fixture</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Computes fingerprint from args, returns stored output without executing</p></div>
+      </div>
+    </div>
+
+    <div role="tabpanel" id="panel-capture" aria-label="sim_capture()" aria-labelledby="tab-capture">
+      <p class="tab-description">Capture any local side effect — tax lookups, pricing engines, internal computations.</p>
+      <pre class="tab-code"><code><span class="kw">with</span> <span class="fn">sim_capture</span>(<span class="str">"tax_service"</span>) <span class="kw">as</span> cap:
+    <span class="kw">if not</span> cap.replaying:
+        tax_rate <span class="op">=</span> tax_api.lookup(user_id)
+        cap.set_result({<span class="str">"rate"</span>: tax_rate})
+    tax <span class="op">=</span> cap.result[<span class="str">"rate"</span>]</code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>Block executes, <code>set_result()</code> stores the value</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Block skipped, <code>cap.result</code> returns recorded value</p></div>
+      </div>
+    </div>
+
+    <div role="tabpanel" id="panel-db" aria-label="sim_db()" aria-labelledby="tab-db">
+      <p class="tab-description">Wrap any database cursor to record queries and results. Writes are blocked in replay to prevent mutations.</p>
+      <pre class="tab-code"><code><span class="kw">with</span> <span class="fn">sim_db</span>(db, name<span class="op">=</span><span class="str">"products"</span>) <span class="kw">as</span> sdb:
+    rows <span class="op">=</span> sdb.query(<span class="str">"SELECT price FROM products WHERE sku = %s"</span>, [sku])
+    <span class="cm"># INSERT/UPDATE blocked in replay → SimWriteBlockedError</span></code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>Queries execute normally, results captured</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Returns recorded rows; INSERT/UPDATE/DELETE raise <code>SimWriteBlockedError</code></p></div>
+      </div>
+    </div>
+
+    <div role="tabpanel" id="panel-http" aria-label="sim_http()" aria-labelledby="tab-http">
+      <p class="tab-description">Wrap any HTTP client to record requests and responses. No network calls in replay.</p>
+      <pre class="tab-code"><code><span class="kw">with</span> <span class="fn">sim_http</span>(http_client, name<span class="op">=</span><span class="str">"shipping"</span>) <span class="kw">as</span> client:
+    resp <span class="op">=</span> client.get(<span class="str">"https://api.shipping.co/v1/rate"</span>, params<span class="op">=</span>{<span class="str">"weight"</span>: <span class="num">2.5</span>})
+    cost <span class="op">=</span> resp.json()[<span class="str">"cost"</span>]</code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>HTTP request executes, response captured</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Returns <code>FakeResponse</code> with recorded data, no network call</p></div>
+      </div>
+    </div>
+  </section>
 
   <!-- Section 4: Code Example -->
   <section id="code-example"></section>
@@ -260,6 +384,22 @@
   <section id="subscribe"></section>
 
   <script>
+    // Tab switching
+    document.querySelectorAll('[role="tab"]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('[role="tab"]').forEach(t => t.setAttribute('aria-selected', 'false'));
+        document.querySelectorAll('[role="tabpanel"]').forEach(p => p.classList.remove('active'));
+        tab.setAttribute('aria-selected', 'true');
+        document.getElementById(tab.getAttribute('aria-controls')).classList.add('active');
+      });
+      tab.addEventListener('keydown', (e) => {
+        const tabs = [...document.querySelectorAll('[role="tab"]')];
+        const idx = tabs.indexOf(tab);
+        if (e.key === 'ArrowRight') { tabs[(idx + 1) % tabs.length].focus(); tabs[(idx + 1) % tabs.length].click(); }
+        if (e.key === 'ArrowLeft') { tabs[(idx - 1 + tabs.length) % tabs.length].focus(); tabs[(idx - 1 + tabs.length) % tabs.length].click(); }
+      });
+    });
+
     // Terminal animation — trigger on scroll into view
     const terminal = document.querySelector('.terminal');
     if (terminal) {
