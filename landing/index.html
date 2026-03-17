@@ -50,18 +50,144 @@
       clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
     }
 
+    /* ── Hero ── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 2rem;
+      background: linear-gradient(180deg, var(--bg-primary), var(--bg-secondary));
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        radial-gradient(circle, var(--border) 1px, transparent 1px);
+      background-size: 32px 32px;
+      opacity: 0.3;
+      pointer-events: none;
+    }
+    .hero h1 {
+      font-size: 3.5rem;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 1.5rem;
+      position: relative;
+    }
+    .hero .subtitle {
+      max-width: 640px;
+      color: var(--text-secondary);
+      font-size: 1.25rem;
+      margin-bottom: 2rem;
+      position: relative;
+    }
+    .subscribe-form {
+      display: flex;
+      gap: 0.5rem;
+      max-width: 440px;
+      width: 100%;
+      position: relative;
+    }
+    .subscribe-form input[type="email"] {
+      flex: 1;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-family: var(--font-body);
+      outline: none;
+    }
+    .subscribe-form input[type="email"]:focus {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.3);
+    }
+    .subscribe-form button {
+      background: var(--accent-green);
+      color: #fff;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: var(--font-body);
+      white-space: nowrap;
+    }
+    .subscribe-form button:hover { background: var(--accent-green-hover); }
+    .subscribe-form button:focus-visible {
+      outline: 2px solid var(--accent-blue);
+      outline-offset: 2px;
+    }
+    .terminal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      max-width: 500px;
+      width: 100%;
+      font-family: var(--font-code);
+      font-size: 0.9rem;
+      text-align: left;
+      margin-top: 3rem;
+      position: relative;
+    }
+    .terminal-line {
+      padding: 0.25rem 0;
+      opacity: 0;
+    }
+    .terminal.animate .terminal-line {
+      animation: fadeIn 0.5s ease forwards;
+    }
+    .terminal.animate .terminal-line:nth-child(1) { animation-delay: 0.5s; }
+    .terminal.animate .terminal-line:nth-child(2) { animation-delay: 1.5s; }
+    .terminal.animate .terminal-line:nth-child(3) { animation-delay: 2.5s; }
+    .terminal.animate .terminal-line:nth-child(4) { animation-delay: 3.5s; }
+    .terminal-prompt { color: var(--accent-green); }
+    .terminal-output { color: var(--text-secondary); }
+    .terminal-success { color: var(--accent-green); }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
     /* ── Responsive Skeleton ── */
     @media (max-width: 1024px) {
       /* tablet overrides go here */
     }
     @media (max-width: 767px) {
-      /* mobile overrides go here */
+      .hero h1 { font-size: 2.25rem; }
+      .hero .subtitle { font-size: 1.05rem; }
+      .subscribe-form { flex-direction: column; }
     }
   </style>
 </head>
 <body>
   <!-- Section 1: Hero -->
-  <section id="hero"></section>
+  <section id="hero" class="hero">
+    <h1>Catch the bugs your tests miss</h1>
+    <p class="subtitle">dopl records real service interactions and replays them deterministically — catching '200 OK but wrong' regressions before they reach production.</p>
+    <form class="subscribe-form" aria-label="Subscribe for early access">
+      <label for="hero-email" class="sr-only">Email address</label>
+      <input type="email" id="hero-email" placeholder="your@email.com" required>
+      <button type="submit">Get Early Access</button>
+    </form>
+    <div class="form-message"></div>
+    <div class="terminal" aria-hidden="true">
+      <div class="terminal-line"><span class="terminal-prompt">$</span> dopl record</div>
+      <div class="terminal-line"><span class="terminal-output">▓▓▓▓▓▓▓▓▓▓ 47 fixtures captured</span></div>
+      <div class="terminal-line"><span class="terminal-prompt">$</span> dopl replay --pr 142</div>
+      <div class="terminal-line"><span class="terminal-output terminal-success">▓▓▓▓▓▓▓▓▓▓ 0 regressions found ✓</span></div>
+    </div>
+    <span class="sr-only">Terminal demo showing dopl recording 47 fixtures and replaying with 0 regressions found.</span>
+  </section>
 
   <!-- Section 2: Problem Statement -->
   <section id="problem"></section>
@@ -77,5 +203,20 @@
 
   <!-- Section 6: Subscribe -->
   <section id="subscribe"></section>
+
+  <script>
+    // Terminal animation — trigger on scroll into view
+    const terminal = document.querySelector('.terminal');
+    if (terminal) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            terminal.classList.add('animate');
+          }
+        });
+      }, { threshold: 0.5 });
+      observer.observe(terminal);
+    }
+  </script>
 </body>
 </html>
