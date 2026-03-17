@@ -207,6 +207,28 @@
     .mode-grid .mode-replay .mode-label { color: var(--accent-blue); }
     .mode-grid p { font-size: 0.9rem; color: var(--text-secondary); }
 
+    /* ── Code Example ── */
+    .code-example { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .code-example h2 { text-align: center; font-size: 2rem; margin-bottom: 0.5rem; }
+    .code-example .subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 2.5rem; }
+    .code-block {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      overflow-x: auto;
+      font-family: var(--font-code);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+    .code-block .kw { color: #ff7b72; }
+    .code-block .str { color: #a5d6ff; }
+    .code-block .fn { color: #d2a8ff; }
+    .code-block .cm { color: #8b949e; }
+    .code-block .dec { color: #ffa657; }
+    .code-block .op { color: var(--text-primary); }
+    .code-block .num { color: #79c0ff; }
+
     /* ── Problem Statement ── */
     .problem { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
     .problem h2 { text-align: center; font-size: 2rem; margin-bottom: 0.75rem; }
@@ -375,7 +397,38 @@
   </section>
 
   <!-- Section 4: Code Example -->
-  <section id="code-example"></section>
+  <section id="code-example" class="code-example">
+    <h2>See it in action</h2>
+    <p class="subtitle">One function, four primitives. Record everything, replay deterministically.</p>
+    <div class="code-block">
+      <pre><code><span class="dec">@sim_trace</span>  <span class="cm"># ← Record inputs/output, skip body on replay</span>
+<span class="kw">def</span> <span class="fn">calculate_quote</span>(user_id, items):
+    <span class="cm"># Database reads: recorded, writes: blocked in replay</span>
+    <span class="kw">with</span> <span class="fn">sim_db</span>(db, name<span class="op">=</span><span class="str">"products"</span>) <span class="kw">as</span> sdb:
+        products <span class="op">=</span> sdb.query(
+            <span class="str">"SELECT sku, price FROM products WHERE sku IN %s"</span>, [items]
+        )
+
+    <span class="cm"># Capture any local side effect</span>
+    <span class="kw">with</span> <span class="fn">sim_capture</span>(<span class="str">"tax_service"</span>) <span class="kw">as</span> cap:
+        <span class="kw">if not</span> cap.replaying:
+            cap.set_result({<span class="str">"rate"</span>: tax_api.lookup(user_id)})
+        tax_rate <span class="op">=</span> cap.result[<span class="str">"rate"</span>]
+
+    <span class="cm"># HTTP calls: real in record, fake response in replay</span>
+    <span class="kw">with</span> <span class="fn">sim_http</span>(shipping_client, name<span class="op">=</span><span class="str">"shipping"</span>) <span class="kw">as</span> client:
+        resp <span class="op">=</span> client.get(<span class="str">"/v1/rate"</span>, params<span class="op">=</span>{<span class="str">"weight"</span>: total_weight})
+        shipping <span class="op">=</span> resp.json()[<span class="str">"cost"</span>]
+
+    subtotal <span class="op">=</span> <span class="fn">sum</span>(p[<span class="str">"price"</span>] <span class="kw">for</span> p <span class="kw">in</span> products)
+    <span class="kw">return</span> {
+        <span class="str">"subtotal"</span>: subtotal,
+        <span class="str">"tax"</span>: subtotal <span class="op">*</span> tax_rate,
+        <span class="str">"shipping"</span>: shipping,
+        <span class="str">"total"</span>: subtotal <span class="op">*</span> (<span class="num">1</span> <span class="op">+</span> tax_rate) <span class="op">+</span> shipping,
+    }</code></pre>
+    </div>
+  </section>
 
   <!-- Section 5: Benefits -->
   <section id="benefits"></section>
