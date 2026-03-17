@@ -5,15 +5,15 @@ Uses FakeHTTPClient / FakeClientResponse — NOT requests, httpx, or any real HT
 
 Covers all acceptance criteria:
 1.  Record mode — real HTTP method called, fixture written, stubs collected
-2.  Replay mode — returns FakeResponse, real client NOT called, stubs pushed
-3.  Replay stub miss — missing fixture -> SimStubMissError, different URL/body -> miss
+2.  Replay mode — returns FakeResponse from StubStore, real client NOT called
+3.  Replay stub miss — no ReplayContext or missing stub → default 200 + warning
 4.  FakeResponse — .status_code, .json(), .text, .headers, .content, .ok, .raise_for_status()
-5.  Ordinal tracking — same endpoint increments ordinal, replay respects ordinals
+5.  Ordinal tracking — same name increments ordinal, replay respects ordinals
 6.  Original unmodified — no attributes added, proxy is different object
 7.  Generic interface — works with any object with .get()/.post()/.request()
 8.  Zero dependencies — source inspection for forbidden imports
 9.  Off mode — returns original object, no fixtures created
-10. Round-trip — record then replay returns identical response data
+10. Replay from fixture — FakeResponse built from StubStore lookup
 11. URL normalization — query param sorting, scheme lowercasing, fragment stripping
 12. Stable headers — authorization hashed, content-type included, user-agent excluded
 13. Sink integration — ctx.sink.emit() called with correct FixtureEvent
@@ -39,7 +39,7 @@ from sim_sdk.http import (
     _parse_call_args,
     _compute_http_fingerprint,
 )
-from sim_sdk.errors import SimStubMissError
+from sim_sdk.replay_context import ReplayContext, get_replay_context
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +117,12 @@ class FakeHTTPGetOnly:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures and helpers
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def clean_context():
-    """Ensure each test starts with a clean context."""
+    """Ensure each test starts with a clean SimContext."""
     clear_context()
     yield
     clear_context()
@@ -135,16 +135,16 @@ def stub_dir(tmp_path):
 
 
 def make_record_ctx(stub_dir: Path, run_id: str = "test-run") -> SimContext:
-    """Create a record-mode context."""
+    """Create a record-mode SimContext with stub_dir."""
     stub_dir.mkdir(parents=True, exist_ok=True)
     ctx = SimContext(mode=SimMode.RECORD, run_id=run_id, stub_dir=stub_dir)
     set_context(ctx)
     return ctx
 
 
-def make_replay_ctx(stub_dir: Path, run_id: str = "test-run") -> SimContext:
-    """Create a replay-mode context."""
-    ctx = SimContext(mode=SimMode.REPLAY, run_id=run_id, stub_dir=stub_dir)
+def make_replay_sim_ctx(run_id: str = "test-run") -> SimContext:
+    """Set a SimContext in REPLAY mode. Stub lookup is via ReplayContext/StubStore."""
+    ctx = SimContext(mode=SimMode.REPLAY, run_id=run_id)
     set_context(ctx)
     return ctx
 
@@ -154,6 +154,35 @@ def make_off_ctx() -> SimContext:
     ctx = SimContext(mode=SimMode.OFF)
     set_context(ctx)
     return ctx
+
+
+def _write_http_fixture(fixture_dir: Path, fixture_id: str, name: str, stubs: list) -> None:
+    """Write a fixture.json with HTTP stubs in the StubStore format.
+
+    Args:
+        fixture_dir: Directory to write the fixture file into.
+        fixture_id: Fixture filename stem (e.g. "my_fixture" → my_fixture.json).
+        name: HTTP client label (matches sim_http name=).
+        stubs: List of dicts with keys: ordinal, status_code, body, headers.
+    """
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    data = {
+        "schema_version": 1,
+        "stubs": [
+            {
+                "qualname": f"http:{name}",
+                "output": {
+                    "status_code": s.get("status_code", 200),
+                    "body": s.get("body", ""),
+                    "headers": s.get("headers", {}),
+                },
+                "ordinal": s.get("ordinal", 0),
+                "event_type": "Stub",
+            }
+            for s in stubs
+        ],
+    }
+    (fixture_dir / f"{fixture_id}.json").write_text(json.dumps(data), encoding="utf-8")
 
 
 # ===========================================================================
@@ -235,67 +264,82 @@ class TestRecordMode:
 # ===========================================================================
 
 class TestReplayMode:
-    """Replay mode: returns FakeResponse, real client NOT called, stubs pushed."""
+    """Replay mode: StubStore lookup via ReplayContext, real client NOT called."""
 
-    def test_replay_returns_fake_response(self, stub_dir):
-        """Replay returns a FakeResponse with the recorded data."""
+    def test_replay_returns_fake_response(self, tmp_path):
+        """Replay returns a FakeResponse with data from the fixture."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '[{"id": 1}]',
+             "headers": {"Content-Type": "application/json"}, "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/users",
-                            FakeClientResponse(200, '[{"id": 1}]',
-                                               {"Content-Type": "application/json"}))
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/users")
-
-        client.call_log.clear()
-
-        # Replay
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            result = s.get("https://api.example.com/users")
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.get("https://api.example.com/users")
 
         assert isinstance(result, FakeResponse)
         assert result.status_code == 200
         assert result.text == '[{"id": 1}]'
 
-    def test_replay_does_not_call_real_client(self, stub_dir):
+    def test_replay_does_not_call_real_client(self, tmp_path):
         """In replay mode, the real HTTP client is never called."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"ok": true}', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/users",
-                            FakeClientResponse(200, '{"ok": true}'))
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/users")
-
-        client.call_log.clear()
-
-        # Replay
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/users")
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                s.get("https://api.example.com/users")
 
         assert len(client.call_log) == 0
 
-    def test_replay_pushes_stub(self, stub_dir):
+    def test_replay_pushes_stub(self, tmp_path):
         """Replay pushes recorded response to ctx.collected_stubs."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"v": 1}', "ordinal": 0},
+        ])
+        ctx = make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/data",
-                            FakeClientResponse(200, '{"v": 1}'))
 
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/data")
-
-        ctx = make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/data")
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                s.get("https://api.example.com/data")
 
         assert len(ctx.collected_stubs) == 1
         assert ctx.collected_stubs[0]["source"] == "replay"
+
+    def test_replay_restores_error_status(self, tmp_path):
+        """Replay preserves non-2xx status codes."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 404, "body": '{"error": "not found"}', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.get("https://api.example.com/missing")
+
+        assert result.status_code == 404
+        assert result.ok is False
+
+    def test_replay_restores_headers(self, tmp_path):
+        """Replay preserves recorded response headers."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": "{}", "headers": {"X-Custom": "value"}, "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.get("https://api.example.com/data")
+
+        assert result.headers["X-Custom"] == "value"
 
 
 # ===========================================================================
@@ -303,73 +347,84 @@ class TestReplayMode:
 # ===========================================================================
 
 class TestReplayStubMiss:
-    """Missing fixture -> SimStubMissError, different URL/body -> miss."""
+    """Stub miss returns FakeResponse(200, '', {}) — never raises, never calls real client."""
 
-    def test_missing_fixture_raises(self, stub_dir):
-        """Replay with no recorded fixture raises SimStubMissError."""
-        stub_dir.mkdir(parents=True, exist_ok=True)
-        make_replay_ctx(stub_dir)
+    def test_no_replay_context_returns_default_200(self):
+        """When no ReplayContext is active, returns default 200."""
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
 
-        with pytest.raises(SimStubMissError):
+        with sim_http(client, name="api") as s:
+            result = s.get("https://api.example.com/data")
+
+        assert isinstance(result, FakeResponse)
+        assert result.status_code == 200
+        assert result.text == ""
+
+    def test_stub_miss_returns_default_200(self, tmp_path):
+        """Fixture exists but has no stub for this name → returns default 200."""
+        _write_http_fixture(tmp_path, "fix", "other_service", [
+            {"status_code": 200, "body": "{}", "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
             with sim_http(client, name="api") as s:
-                s.get("https://api.example.com/nonexistent")
+                result = s.get("https://api.example.com/data")
 
-    def test_error_has_diagnostics(self, stub_dir):
-        """SimStubMissError contains the http name in qualname."""
-        stub_dir.mkdir(parents=True, exist_ok=True)
-        make_replay_ctx(stub_dir)
+        assert result.status_code == 200
+        assert result.text == ""
+
+    def test_no_real_call_on_miss(self, tmp_path):
+        """Real client is never called even on stub miss."""
+        _write_http_fixture(tmp_path, "fix", "other_service", [])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
 
-        with pytest.raises(SimStubMissError) as exc_info:
-            with sim_http(client, name="myapi") as s:
-                s.get("https://api.example.com/missing")
-
-        assert exc_info.value.stub_type == "http"
-
-    def test_missing_stub_dir_raises(self):
-        """Replay with no stub_dir raises SimStubMissError."""
-        ctx = SimContext(mode=SimMode.REPLAY, run_id="test", stub_dir=None)
-        set_context(ctx)
-        client = FakeHTTPClient()
-
-        with pytest.raises(SimStubMissError):
-            with sim_http(client) as s:
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
                 s.get("https://api.example.com/data")
 
-    def test_different_url_miss(self, stub_dir):
-        """Same method with different URL produces a miss."""
+        assert len(client.call_log) == 0
+
+    def test_ordinal_exhaustion_returns_default_200(self, tmp_path):
+        """A call beyond recorded ordinal count returns default 200."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"first": true}', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/a",
-                            FakeClientResponse(200, "a"))
 
-        # Record GET /a
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/a")
-
-        # Replay GET /b — should miss
-        make_replay_ctx(stub_dir)
-        with pytest.raises(SimStubMissError):
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
             with sim_http(client, name="api") as s:
-                s.get("https://api.example.com/b")
+                first = s.get("https://api.example.com/data")
+                second = s.get("https://api.example.com/data")  # ordinal 1 — no stub
 
-    def test_different_body_miss(self, stub_dir):
-        """Same URL with different body produces a miss."""
+        assert first.status_code == 200
+        assert first.text == '{"first": true}'
+        assert second.status_code == 200
+        assert second.text == ""
+
+    def test_miss_default_has_empty_headers(self):
+        """Default 200 on miss has empty headers."""
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("POST", "https://api.example.com/data",
-                            FakeClientResponse(200, "ok"))
 
-        # Record with body={"a": 1}
-        make_record_ctx(stub_dir)
         with sim_http(client, name="api") as s:
-            s.post("https://api.example.com/data", json={"a": 1})
+            result = s.get("https://api.example.com/data")
 
-        # Replay with body={"a": 999} — should miss
-        make_replay_ctx(stub_dir)
-        with pytest.raises(SimStubMissError):
-            with sim_http(client, name="api") as s:
-                s.post("https://api.example.com/data", json={"a": 999})
+        assert result.headers == {}
+
+    def test_miss_response_is_ok(self):
+        """Default 200 on miss satisfies .ok."""
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with sim_http(client, name="api") as s:
+            result = s.get("https://api.example.com/data")
+
+        assert result.ok is True
 
 
 # ===========================================================================
@@ -436,10 +491,10 @@ class TestFakeResponse:
 # ===========================================================================
 
 class TestOrdinalTracking:
-    """Same endpoint increments ordinal, replay respects ordinals."""
+    """Same name increments ordinal; replay consumes ordinals via ReplayContext."""
 
     def test_same_endpoint_increments_ordinal(self, stub_dir):
-        """Two identical requests get ordinal 0 and 1."""
+        """Two identical requests get ordinal 0 and 1 in the fixture files."""
         make_record_ctx(stub_dir)
         client = FakeHTTPClient()
         client.set_response("GET", "https://api.example.com/data",
@@ -458,31 +513,52 @@ class TestOrdinalTracking:
         assert data0["ordinal"] == 0
         assert data1["ordinal"] == 1
 
-    def test_replay_respects_ordinals(self, stub_dir):
-        """Replay returns correct response for each ordinal."""
+    def test_replay_respects_ordinals(self, tmp_path):
+        """Replay delivers stubs in ordinal order via ReplayContext."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"v": 1}', "ordinal": 0},
+            {"status_code": 200, "body": '{"v": 2}', "ordinal": 1},
+        ])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
 
-        # Record — first call returns v1, second returns v2
-        make_record_ctx(stub_dir)
-        client.set_response("GET", "https://api.example.com/data",
-                            FakeClientResponse(200, '{"v": 1}'))
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/data")
-
-        # Change response for second call
-        client.set_response("GET", "https://api.example.com/data",
-                            FakeClientResponse(200, '{"v": 2}'))
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/data")
-
-        client.call_log.clear()
-
-        # Replay — first ordinal
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            r1 = s.get("https://api.example.com/data")
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                r1 = s.get("https://api.example.com/data")
+                r2 = s.get("https://api.example.com/data")
 
         assert r1.json() == {"v": 1}
+        assert r2.json() == {"v": 2}
+
+    def test_different_names_have_independent_ordinals(self, tmp_path):
+        """Two different names each start at ordinal 0."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"svc": "api"}', "ordinal": 0},
+        ])
+        _write_http_fixture(tmp_path, "fix2", "auth", [
+            {"status_code": 200, "body": '{"svc": "auth"}', "ordinal": 0},
+        ])
+        # Merge both into one fixture file
+        combined = {
+            "schema_version": 1,
+            "stubs": [
+                {"qualname": "http:api", "output": {"status_code": 200, "body": '{"svc": "api"}', "headers": {}}, "ordinal": 0, "event_type": "Stub"},
+                {"qualname": "http:auth", "output": {"status_code": 200, "body": '{"svc": "auth"}', "headers": {}}, "ordinal": 0, "event_type": "Stub"},
+            ],
+        }
+        (tmp_path / "combined.json").write_text(json.dumps(combined), encoding="utf-8")
+
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="combined", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s_api:
+                r_api = s_api.get("https://api.example.com/data")
+            with sim_http(client, name="auth") as s_auth:
+                r_auth = s_auth.get("https://auth.example.com/token")
+
+        assert r_api.json() == {"svc": "api"}
+        assert r_auth.json() == {"svc": "auth"}
 
 
 # ===========================================================================
@@ -595,7 +671,7 @@ class TestOffMode:
         client = FakeHTTPClient()
 
         with sim_http(client) as s:
-            assert s is client  # Same object, not a proxy
+            assert s is client
 
     def test_off_mode_request_works(self):
         """Requests work normally in off mode."""
@@ -620,70 +696,88 @@ class TestOffMode:
 
 
 # ===========================================================================
-# 10. Round-Trip
+# 10. Replay from Fixture
 # ===========================================================================
 
-class TestRoundtrip:
-    """Record then replay returns identical response data."""
+class TestReplayFromFixture:
+    """FakeResponse is built correctly from StubStore fixture data."""
 
-    def test_roundtrip_get(self, stub_dir):
-        """GET response survives record/replay round-trip."""
+    def test_status_code_preserved(self, tmp_path):
+        """Status code from fixture is returned correctly."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 201, "body": '{"id": 42}', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/users",
-                            FakeClientResponse(200, '[{"id": 1, "name": "Alice"}]',
-                                               {"Content-Type": "application/json"}))
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/users")
-
-        client.call_log.clear()
-
-        # Replay
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            result = s.get("https://api.example.com/users")
-
-        assert result.status_code == 200
-        assert result.json() == [{"id": 1, "name": "Alice"}]
-        assert len(client.call_log) == 0
-
-    def test_roundtrip_post_with_body(self, stub_dir):
-        """POST with body round-trips correctly."""
-        client = FakeHTTPClient()
-        client.set_response("POST", "https://api.example.com/users",
-                            FakeClientResponse(201, '{"id": 42}'))
-
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.post("https://api.example.com/users", json={"name": "Alice"})
-
-        client.call_log.clear()
-
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            result = s.post("https://api.example.com/users", json={"name": "Alice"})
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.post("https://api.example.com/users", json={"name": "Alice"})
 
         assert result.status_code == 201
         assert result.json() == {"id": 42}
+        assert len(client.call_log) == 0
 
-    def test_roundtrip_error_status(self, stub_dir):
-        """Error status code round-trips correctly."""
+    def test_error_status_preserved(self, tmp_path):
+        """Error status code from fixture round-trips correctly."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 404, "body": '{"error": "not found"}', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
         client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/missing",
-                            FakeClientResponse(404, '{"error": "not found"}'))
 
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/missing")
-
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            result = s.get("https://api.example.com/missing")
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.get("https://api.example.com/missing")
 
         assert result.status_code == 404
         assert result.ok is False
+
+    def test_headers_preserved(self, tmp_path):
+        """Response headers from fixture are returned."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '[{"id": 1}]',
+             "headers": {"Content-Type": "application/json", "X-RateLimit": "100"},
+             "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.get("https://api.example.com/users")
+
+        assert result.headers["Content-Type"] == "application/json"
+        assert result.headers["X-RateLimit"] == "100"
+
+    def test_json_body_deserializable(self, tmp_path):
+        """Body stored as string in fixture is deserializable via .json()."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '[{"id": 1, "name": "Alice"}]', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.get("https://api.example.com/users")
+
+        assert result.json() == [{"id": 1, "name": "Alice"}]
+
+    def test_request_and_get_use_same_stub(self, tmp_path):
+        """Both .request("GET", url) and .get(url) consume from the same stub sequence."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"ok": true}', "ordinal": 0},
+        ])
+        make_replay_sim_ctx()
+        client = FakeHTTPClient()
+
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            with sim_http(client, name="api") as s:
+                result = s.request("GET", "https://api.example.com/data")
+
+        assert result.status_code == 200
+        assert result.json() == {"ok": True}
 
 
 # ===========================================================================
@@ -719,27 +813,21 @@ class TestURLNormalization:
         url = normalize_url("https://api.example.com/Data/Items")
         assert "/Data/Items" in url
 
-    def test_same_url_same_fingerprint(self, stub_dir):
-        """URLs that normalize to the same string produce matching fixtures."""
-        client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/data?b=2&a=1",
-                            FakeClientResponse(200, '{"ok": true}'))
-        client.set_response("GET", "https://api.example.com/data?a=1&b=2",
-                            FakeClientResponse(200, '{"ok": true}'))
+    def test_normalized_urls_produce_same_fingerprint(self):
+        """URLs that normalize the same produce identical fingerprints."""
+        fp1, _, _ = _compute_http_fingerprint(
+            "GET", "https://api.example.com/data?b=2&a=1", None, None,
+        )
+        fp2, _, _ = _compute_http_fingerprint(
+            "GET", "https://api.example.com/data?a=1&b=2", None, None,
+        )
+        assert fp1 == fp2
 
-        # Record with ?b=2&a=1
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.get("https://api.example.com/data?b=2&a=1")
-
-        client.call_log.clear()
-
-        # Replay with ?a=1&b=2 — should match because URL normalizes the same
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            result = s.get("https://api.example.com/data?a=1&b=2")
-
-        assert result.status_code == 200
+    def test_different_paths_produce_different_fingerprints(self):
+        """Different paths produce different fingerprints."""
+        fp1, _, _ = _compute_http_fingerprint("GET", "https://api.example.com/a", None, None)
+        fp2, _, _ = _compute_http_fingerprint("GET", "https://api.example.com/b", None, None)
+        assert fp1 != fp2
 
 
 # ===========================================================================
@@ -852,7 +940,7 @@ class TestAsyncContextManager:
     """async with sim_http(...) works."""
 
     def test_async_record(self, stub_dir):
-        """Async record mode works."""
+        """Async record mode calls the real client."""
         async def _run():
             make_record_ctx(stub_dir)
             client = FakeHTTPClient()
@@ -863,6 +951,26 @@ class TestAsyncContextManager:
                 result = s.get("https://api.example.com/data")
 
             assert result.status_code == 200
+
+        asyncio.run(_run())
+
+    def test_async_replay(self, tmp_path):
+        """Async replay mode returns FakeResponse from StubStore."""
+        _write_http_fixture(tmp_path, "fix", "api", [
+            {"status_code": 200, "body": '{"async": true}', "ordinal": 0},
+        ])
+
+        async def _run():
+            make_replay_sim_ctx()
+            client = FakeHTTPClient()
+
+            with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+                async with sim_http(client, name="api") as s:
+                    result = s.get("https://api.example.com/data")
+
+            assert isinstance(result, FakeResponse)
+            assert result.json() == {"async": True}
+            assert len(client.call_log) == 0
 
         asyncio.run(_run())
 
@@ -935,24 +1043,3 @@ class TestCallArgParsing:
         assert method == "PUT"
         assert url == "https://example.com"
         assert body == {"x": 1}
-
-    def test_roundtrip_request_vs_get(self, stub_dir):
-        """Both .request('GET', url) and .get(url) produce the same fixture fingerprint."""
-        client = FakeHTTPClient()
-        client.set_response("GET", "https://api.example.com/data",
-                            FakeClientResponse(200, '{"ok": true}'))
-
-        # Record via .request("GET", url)
-        make_record_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            s.request("GET", "https://api.example.com/data")
-
-        client.call_log.clear()
-
-        # Replay via .get(url) — should match the same fixture
-        make_replay_ctx(stub_dir)
-        with sim_http(client, name="api") as s:
-            result = s.get("https://api.example.com/data")
-
-        assert result.status_code == 200
-        assert result.json() == {"ok": True}

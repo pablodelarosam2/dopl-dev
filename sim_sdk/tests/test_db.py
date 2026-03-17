@@ -5,27 +5,28 @@ Uses FakeDB classes — NOT psycopg2, SQLAlchemy, or any real database driver.
 
 Covers all acceptance criteria:
 1. Record mode — queries execute via underlying DB object, results captured
-2. Replay mode — queries return recorded rows, underlying DB object not called
-3. SimStubMissError on fingerprint miss with diagnostic details
+2. Replay mode — queries return recorded rows from ReplayContext, real DB not called
+3. Stub miss returns [] with diagnostic log (soft fail)
 4. SimWriteBlockedError on write statements in replay mode
 5. Ordinal correctly tracks repeated identical queries
 6. Outside the with block, original DB object is completely unmodified
 7. Works with any object that has .query() or .execute()
 8. Zero imports from any DB driver
 9. Off mode — passthrough
-10. Round-trip — record then replay returns identical rows
+10. Round-trip — record then replay via StubStore returns identical rows
 """
 
 import asyncio
 import inspect
 import json
 import pytest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
 
 from sim_sdk.context import SimContext, SimMode, set_context, clear_context
-from sim_sdk.db import sim_db, SimWriteBlockedError, DBProxy, _is_write_statement
-from sim_sdk.errors import SimStubMissError
+from sim_sdk.db import sim_db, SimWriteBlockedError, DBProxy, _is_write_statement, _compute_query_fingerprint
+from sim_sdk.replay_context import ReplayContext
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +124,40 @@ def make_off_ctx() -> SimContext:
     return ctx
 
 
+# ---------------------------------------------------------------------------
+# ReplayContext helpers
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def replay_with_stubs(tmp_path, stubs):
+    """Set up SimContext(REPLAY) + ReplayContext from a stubs list.
+
+    Yields the SimContext so tests can inspect it if needed.
+    """
+    fixture_dir = tmp_path / "replay_fixtures"
+    fixture_dir.mkdir(exist_ok=True)
+    (fixture_dir / "test.json").write_text(
+        json.dumps({"schema_version": 1, "stubs": stubs}), encoding="utf-8"
+    )
+    ctx = SimContext(mode=SimMode.REPLAY, run_id="test")
+    set_context(ctx)
+    replay_ctx = ReplayContext(fixture_id="test", fixture_dir=str(fixture_dir))
+    with replay_ctx:
+        yield ctx
+
+
+def _db_stub(sql, params, output, ordinal=0, name="pg"):
+    """Build a fixture stub entry matching what StubStore expects."""
+    sql_fp, params_fp = _compute_query_fingerprint(sql, params)
+    return {
+        "qualname": f"db:{name}",
+        "input_fingerprint": f"{sql_fp[:16]}:{params_fp[:16]}",
+        "output": output,
+        "ordinal": ordinal,
+        "event_type": "Stub",
+    }
+
+
 # ===========================================================================
 # 1. Record Mode
 # ===========================================================================
@@ -211,120 +246,83 @@ class TestRecordMode:
 # ===========================================================================
 
 class TestReplayMode:
-    """Replay mode: queries return recorded rows, underlying DB object not called."""
+    """Replay mode: queries return recorded rows from ReplayContext, real DB not called."""
 
-    def test_replay_returns_recorded_rows(self, stub_dir):
-        """Replay returns the exact rows that were recorded."""
-        fake = FakeDB()
-        fake.set_result("SELECT * FROM users", [{"id": 1, "name": "Alice"}])
+    def test_replay_returns_recorded_rows(self, tmp_path):
+        """Replay returns the rows stored in the StubStore fixture."""
+        rows = [{"id": 1, "name": "Alice"}]
+        stubs = [_db_stub("SELECT * FROM users", None, rows)]
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM users")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM users")
 
-        # Clear call log
-        fake.call_log.clear()
+        assert result == rows
 
-        # Replay
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT * FROM users")
-
-        assert result == [{"id": 1, "name": "Alice"}]
-
-    def test_replay_does_not_call_real_db(self, stub_dir):
+    def test_replay_does_not_call_real_db(self, tmp_path):
         """In replay mode, the real DB object is never called."""
         fake = FakeDB()
-        fake.set_result("SELECT * FROM users", [{"id": 1}])
+        stubs = [_db_stub("SELECT * FROM users", None, [{"id": 1}])]
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM users")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(fake, name="pg") as sdb:
+                sdb.query("SELECT * FROM users")
 
-        fake.call_log.clear()
-
-        # Replay
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM users")
-
-        # Real DB should NOT have been called
         assert len(fake.call_log) == 0
 
-    def test_replay_pushes_stub(self, stub_dir):
-        """Replay pushes recorded result to ctx.collected_stubs."""
-        fake = FakeDB()
-        fake.set_result("SELECT 1", [{"one": 1}])
+    def test_replay_with_params(self, tmp_path):
+        """Parameterized queries are looked up by fingerprint including params."""
+        rows = [{"id": 42, "name": "Eve"}]
+        stubs = [_db_stub("SELECT * FROM users WHERE id = $1", [42], rows)]
 
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT 1")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM users WHERE id = $1", [42])
 
-        ctx = make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT 1")
-
-        assert len(ctx.collected_stubs) == 1
-        assert ctx.collected_stubs[0]["source"] == "replay"
+        assert result == rows
 
 
 # ===========================================================================
-# 3. Replay Stub Miss
+# 3. Replay Stub Miss — soft fail
 # ===========================================================================
 
 class TestReplayStubMiss:
-    """SimStubMissError on fingerprint miss with diagnostic details."""
+    """Stub miss returns [] with a warning log; never raises."""
 
-    def test_missing_fixture_raises(self, stub_dir):
-        """Replay with no recorded fixture raises SimStubMissError."""
-        stub_dir.mkdir(parents=True, exist_ok=True)
-        make_replay_ctx(stub_dir)
-        fake = FakeDB()
+    def test_missing_fingerprint_returns_empty(self, tmp_path):
+        """Replay with no matching stub returns [] instead of raising."""
+        with replay_with_stubs(tmp_path, []):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM nonexistent_table")
 
-        with pytest.raises(SimStubMissError):
-            with sim_db(fake, name="pg") as sdb:
-                sdb.query("SELECT * FROM nonexistent_table")
+        assert result == []
 
-    def test_error_has_diagnostics(self, stub_dir):
-        """SimStubMissError contains the db name in qualname."""
-        stub_dir.mkdir(parents=True, exist_ok=True)
-        make_replay_ctx(stub_dir)
-        fake = FakeDB()
+    def test_different_params_returns_empty(self, tmp_path):
+        """Same SQL with different params produces a miss that returns []."""
+        stubs = [_db_stub("SELECT * FROM users WHERE id = $1", [1], [{"id": 1}])]
 
-        with pytest.raises(SimStubMissError) as exc_info:
-            with sim_db(fake, name="mydb") as sdb:
-                sdb.query("SELECT missing")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM users WHERE id = $1", [999])
 
-        err = exc_info.value
-        assert err.stub_type == "db"
+        assert result == []
 
-    def test_missing_stub_dir_raises(self):
-        """Replay with no stub_dir raises SimStubMissError."""
-        ctx = SimContext(mode=SimMode.REPLAY, run_id="test", stub_dir=None)
+    def test_no_replay_context_returns_empty(self):
+        """Replay with SimContext but no active ReplayContext returns []."""
+        ctx = SimContext(mode=SimMode.REPLAY, run_id="test")
         set_context(ctx)
-        fake = FakeDB()
 
-        with pytest.raises(SimStubMissError):
-            with sim_db(fake) as sdb:
-                sdb.query("SELECT 1")
+        with sim_db(FakeDB()) as sdb:
+            result = sdb.query("SELECT 1")
 
-    def test_different_params_miss(self, stub_dir):
-        """Same SQL with different params produces a miss."""
-        fake = FakeDB()
-        fake.set_result("SELECT * FROM users WHERE id = $1", [{"id": 1}])
+        assert result == []
 
-        # Record with params=[1]
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM users WHERE id = $1", [1])
-
-        # Replay with params=[999] — should miss
-        make_replay_ctx(stub_dir)
-        with pytest.raises(SimStubMissError):
-            with sim_db(fake, name="pg") as sdb:
-                sdb.query("SELECT * FROM users WHERE id = $1", [999])
+    def test_miss_does_not_raise(self, tmp_path):
+        """A stub miss must never propagate an exception."""
+        with replay_with_stubs(tmp_path, []):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM users")
+        assert result == []
 
 
 # ===========================================================================
@@ -411,20 +409,14 @@ class TestWriteBlocked:
         assert "INSERT INTO users" in str(exc_info.value)
         assert exc_info.value.name == "mydb"
 
-    def test_select_not_blocked(self, stub_dir):
+    def test_select_not_blocked(self, tmp_path):
         """SELECT statements are NOT blocked in replay."""
-        fake = FakeDB()
-        fake.set_result("SELECT 1", [{"one": 1}])
+        stubs = [_db_stub("SELECT 1", None, [{"one": 1}])]
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT 1")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT 1")
 
-        # Replay — should NOT raise
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT 1")
         assert result == [{"one": 1}]
 
     def test_writes_allowed_in_record(self, stub_dir):
@@ -464,28 +456,22 @@ class TestOrdinalTracking:
         assert data0["ordinal"] == 0
         assert data1["ordinal"] == 1
 
-    def test_replay_respects_ordinals(self, stub_dir):
-        """Replay returns correct value for each ordinal."""
-        fake = FakeDB()
+    def test_replay_respects_ordinals(self, tmp_path):
+        """Same fingerprint called twice returns ordinal-0 then ordinal-1."""
+        sql = "SELECT * FROM t WHERE id = $1"
+        params = [1]
+        stubs = [
+            _db_stub(sql, params, [{"round": "first"}], ordinal=0),
+            _db_stub(sql, params, [{"round": "second"}], ordinal=1),
+        ]
 
-        # Record — return different results for same query via side effects
-        # We'll use different params to simulate
-        make_record_ctx(stub_dir)
-        fake.set_result("SELECT * FROM t WHERE id = $1", [{"id": 1}])
-        with sim_db(fake, name="pg") as sdb:
-            r1 = sdb.query("SELECT * FROM t WHERE id = $1", [1])
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                r0 = sdb.query(sql, params)
+                r1 = sdb.query(sql, params)
 
-        # Second query with different params
-        fake.set_result("SELECT * FROM t WHERE id = $1", [{"id": 2}])
-        ctx2 = make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            r2 = sdb.query("SELECT * FROM t WHERE id = $1", [2])
-
-        # Replay first
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT * FROM t WHERE id = $1", [1])
-        assert result == [{"id": 1}]
+        assert r0 == [{"round": "first"}]
+        assert r1 == [{"round": "second"}]
 
 
 # ===========================================================================
@@ -631,79 +617,61 @@ class TestOffMode:
 
 
 # ===========================================================================
-# 10. Round-Trip
+# 10. Round-Trip via StubStore
 # ===========================================================================
 
 class TestRoundtrip:
-    """Record then replay returns identical rows."""
+    """Verify that replay returns the exact rows stored in the fixture."""
 
-    def test_roundtrip_select(self, stub_dir):
-        """SELECT result survives record/replay round-trip."""
-        fake = FakeDB()
+    def test_roundtrip_select(self, tmp_path):
+        """SELECT result is returned unchanged from the StubStore."""
         rows = [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
-        fake.set_result("SELECT * FROM users", rows)
+        stubs = [_db_stub("SELECT * FROM users", None, rows)]
 
-        # Record
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM users")
-
-        fake.call_log.clear()
-
-        # Replay
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT * FROM users")
+        fake = FakeDB()
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(fake, name="pg") as sdb:
+                result = sdb.query("SELECT * FROM users")
 
         assert result == rows
-        assert len(fake.call_log) == 0  # Real DB not called
+        assert len(fake.call_log) == 0  # real DB never called
 
-    def test_roundtrip_with_params(self, stub_dir):
-        """Parameterized query round-trips correctly."""
-        fake = FakeDB()
-        fake.set_result("SELECT * FROM users WHERE id = $1", [{"id": 42, "name": "Eve"}])
+    def test_roundtrip_with_params(self, tmp_path):
+        """Parameterized query returns correct rows from StubStore."""
+        rows = [{"id": 42, "name": "Eve"}]
+        stubs = [_db_stub("SELECT * FROM users WHERE id = $1", [42], rows)]
 
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM users WHERE id = $1", [42])
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM users WHERE id = $1", [42])
 
-        fake.call_log.clear()
+        assert result == rows
 
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT * FROM users WHERE id = $1", [42])
+    def test_roundtrip_empty_result(self, tmp_path):
+        """Empty result set is returned as-is, not confused with a stub miss."""
+        stubs = [_db_stub("SELECT * FROM empty_table", None, [])]
 
-        assert result == [{"id": 42, "name": "Eve"}]
-
-    def test_roundtrip_empty_result(self, stub_dir):
-        """Empty result set round-trips correctly."""
-        fake = FakeDB()
-        fake.set_result("SELECT * FROM empty_table", [])
-
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM empty_table")
-
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT * FROM empty_table")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM empty_table")
 
         assert result == []
 
-    def test_roundtrip_none_result(self, stub_dir):
-        """None result round-trips correctly."""
-        fake = FakeDB()
-        fake.set_result("SELECT * FROM t", None)
+    def test_roundtrip_null_output_treated_as_empty(self, tmp_path):
+        """A fixture with output=null is normalized to [] on replay.
 
-        make_record_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            sdb.query("SELECT * FROM t")
+        None cannot serve as both a stored value and a miss sentinel in
+        StubStore (dict.get() returns None for both), so null outputs are
+        coerced to [] during indexing.  DB drivers that return None are
+        unusual; treating them as empty-result is correct behaviour.
+        """
+        stubs = [_db_stub("SELECT * FROM t", None, None)]
 
-        make_replay_ctx(stub_dir)
-        with sim_db(fake, name="pg") as sdb:
-            result = sdb.query("SELECT * FROM t")
+        with replay_with_stubs(tmp_path, stubs):
+            with sim_db(FakeDB(), name="pg") as sdb:
+                result = sdb.query("SELECT * FROM t")
 
-        assert result is None
+        assert result == []
 
 
 # ===========================================================================

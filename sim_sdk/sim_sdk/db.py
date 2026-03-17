@@ -22,8 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .context import SimContext, SimMode, get_context
 from .canonical import normalize_sql, fingerprint, fingerprint_sql
-from .errors import SimStubMissError
 from .fixture.schema import FixtureEvent
+from .replay_context import get_replay_context
 from .trace import _make_serializable
 
 logger = logging.getLogger(__name__)
@@ -148,22 +148,6 @@ def _write_db_fixture(
     logger.debug("No sink or stub_dir — db fixture %r discarded", name)
 
 
-def _read_db_fixture(
-    name: str,
-    sql_fp: str,
-    params_fp: str,
-    ordinal: int,
-    stub_dir: Path,
-) -> Optional[Dict[str, Any]]:
-    """Read a recorded DB query fixture from stub_dir."""
-    key = _db_fixture_key(name, sql_fp, params_fp, ordinal)
-    filepath = stub_dir / key
-    if filepath.exists():
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
-
-
 # ---------------------------------------------------------------------------
 # DBProxy — intercepts .query() and .execute() calls
 # ---------------------------------------------------------------------------
@@ -209,55 +193,53 @@ class DBProxy:
         name = object.__getattribute__(self, "_name")
         db_object = object.__getattribute__(self, "_db_object")
 
-        # Compute fingerprints
         sql_fp, params_fp = _compute_query_fingerprint(sql, params)
-        combined_fp = f"db:{name}:{sql_fp[:16]}:{params_fp[:16]}"
-        ordinal = ctx.next_ordinal(combined_fp)
 
         if ctx.is_replaying:
-            return self._replay_call(sql, params, sql_fp, params_fp, ordinal, name, ctx)
+            return self._replay_call(sql, params, sql_fp, params_fp, name)
 
         if ctx.is_recording:
+            combined_fp = f"db:{name}:{sql_fp[:16]}:{params_fp[:16]}"
+            ordinal = ctx.next_ordinal(combined_fp)
             return self._record_call(
                 method_name, sql, params, sql_fp, params_fp, ordinal,
                 name, db_object, ctx, *args, **kwargs,
             )
 
-        # Should not reach here (off mode is handled by sim_db yielding raw object)
+        # Off mode passthrough (sim_db yielding raw object handles this, but
+        # DBProxy can also be reached if context changes mid-request)
         real_method = getattr(db_object, method_name)
         if params is not None:
             return real_method(sql, params, *args, **kwargs)
         return real_method(sql, *args, **kwargs)
 
     def _replay_call(
-        self, sql: str, params: Any, sql_fp: str, params_fp: str,
-        ordinal: int, name: str, ctx: SimContext,
+        self, sql: str, params: Any, sql_fp: str, params_fp: str, name: str,
     ) -> Any:
-        """Handle a DB call in replay mode."""
-        # Block writes in replay
+        """Handle a DB call in replay mode — never touches the real DB."""
         if _is_write_statement(sql):
             raise SimWriteBlockedError(sql, name)
 
-        if ctx.stub_dir is None:
-            raise SimStubMissError("db", f"{sql_fp[:16]}:{params_fp[:16]}", ordinal, [])
+        fp = f"{sql_fp[:16]}:{params_fp[:16]}"
+        replay_ctx = get_replay_context()
 
-        fixture = _read_db_fixture(name, sql_fp, params_fp, ordinal, ctx.stub_dir)
-        if fixture is None:
-            raise SimStubMissError("db", f"{sql_fp[:16]}:{params_fp[:16]}", ordinal, [])
+        if replay_ctx is None:
+            logger.warning(
+                "db replay: no ReplayContext active for fingerprint=%s — returning []", fp,
+            )
+            return []
 
-        result = fixture.get("result")
+        ordinal = replay_ctx.next_db_ordinal(fp)
+        rows = replay_ctx.stub_store.get_db_stub(fp, ordinal)
 
-        # Push to collected_stubs for outer @sim_trace
-        ctx.collected_stubs.append({
-            "type": "db_query",
-            "name": name,
-            "sql": sql,
-            "ordinal": ordinal,
-            "result": result,
-            "source": "replay",
-        })
+        if rows is None:
+            logger.warning(
+                "db stub miss: fixture_id=%s fingerprint=%s ordinal=%d — returning []",
+                replay_ctx.fixture_id, fp, ordinal,
+            )
+            return []
 
-        return result
+        return rows
 
     def _record_call(
         self, method_name: str, sql: str, params: Any,

@@ -23,7 +23,7 @@ from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 from .context import SimContext, SimMode, get_context
 from .canonical import fingerprint
 from .fixture.schema import FixtureEvent
-from .errors import SimStubMissError
+from .replay_context import get_replay_context
 from .trace import _make_serializable
 
 logger = logging.getLogger(__name__)
@@ -191,16 +191,16 @@ def _compute_http_fingerprint(
 # ---------------------------------------------------------------------------
 
 def _http_fixture_key(
-    name: str, method: str, url_fp: str, body_fp: str, ordinal: int,
+    name: str, method: str, url_fp: str, body_fp: str, headers_fp: str, ordinal: int,
 ) -> str:
     """Build the relative path key for an HTTP fixture file.
 
-    Layout: __http__/{safe_name}_{METHOD}_{url_fp[:8]}_{body_fp[:8]}_{ordinal}.json
+    Layout: __http__/{safe_name}_{METHOD}_{url_fp[:8]}_{body_fp[:8]}_{headers_fp[:8]}_{ordinal}.json
     """
     safe_name = name.replace(".", "_").replace("/", "_").replace(" ", "_")
     return (
         f"__http__/{safe_name}_{method.upper()}"
-        f"_{url_fp[:8]}_{body_fp[:8]}_{ordinal}.json"
+        f"_{url_fp[:8]}_{body_fp[:8]}_{headers_fp[:8]}_{ordinal}.json"
     )
 
 
@@ -217,7 +217,7 @@ def _write_http_fixture(
     ctx: SimContext,
 ) -> None:
     """Persist an HTTP request fixture to sink or stub_dir."""
-    key = _http_fixture_key(name, method, url_fp, body_fp, ordinal)
+    key = _http_fixture_key(name, method, url_fp, body_fp, headers_fp, ordinal)
 
     if ctx.sink is not None:
         event = FixtureEvent(
@@ -259,23 +259,6 @@ def _write_http_fixture(
         return
 
     logger.debug("No sink or stub_dir — http fixture %r discarded", name)
-
-
-def _read_http_fixture(
-    name: str,
-    method: str,
-    url_fp: str,
-    body_fp: str,
-    ordinal: int,
-    stub_dir: Path,
-) -> Optional[Dict[str, Any]]:
-    """Read a recorded HTTP fixture from stub_dir."""
-    key = _http_fixture_key(name, method, url_fp, body_fp, ordinal)
-    filepath = stub_dir / key
-    if filepath.exists():
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -401,20 +384,17 @@ class HTTPProxy:
         # Parse call arguments
         http_method, url, body, headers = _parse_call_args(method_name, args, kwargs)
 
-        # Compute fingerprints
-        url_fp, body_fp, headers_fp = _compute_http_fingerprint(
-            http_method, url, body, headers,
-        )
-        combined_fp = f"http:{name}:{http_method}:{url_fp[:16]}:{body_fp[:16]}"
-        ordinal = ctx.next_ordinal(combined_fp)
-
         if ctx.is_replaying:
-            return self._replay_call(
-                http_method, url, body, url_fp, body_fp, headers_fp,
-                ordinal, name, ctx,
-            )
+            return self._replay_call(http_method, url, name, ctx)
 
         if ctx.is_recording:
+            url_fp, body_fp, headers_fp = _compute_http_fingerprint(
+                http_method, url, body, headers,
+            )
+            combined_fp = (
+                f"http:{name}:{http_method}:{url_fp[:16]}:{body_fp[:16]}:{headers_fp[:16]}"
+            )
+            ordinal = ctx.next_ordinal(combined_fp)
             return self._record_call(
                 method_name, http_method, url, body, url_fp, body_fp,
                 headers_fp, ordinal, name, http_object, ctx, args, kwargs,
@@ -428,29 +408,34 @@ class HTTPProxy:
         self,
         http_method: str,
         url: str,
-        body: Any,
-        url_fp: str,
-        body_fp: str,
-        headers_fp: str,
-        ordinal: int,
         name: str,
         ctx: SimContext,
     ) -> FakeResponse:
-        """Handle an HTTP call in replay mode."""
-        if ctx.stub_dir is None:
-            raise SimStubMissError(
-                "http", f"{url_fp[:16]}:{body_fp[:16]}", ordinal, [],
-            )
+        """Handle an HTTP call in replay mode — never touches the real HTTP object.
 
-        fixture = _read_http_fixture(
-            name, http_method, url_fp, body_fp, ordinal, ctx.stub_dir,
-        )
-        if fixture is None:
-            raise SimStubMissError(
-                "http", f"{url_fp[:16]}:{body_fp[:16]}", ordinal, [],
+        Looks up the stub via the active ReplayContext's StubStore, keyed by
+        (name, ordinal).  On miss returns FakeResponse(200, "", {}) and logs a
+        warning so callers can detect the gap without crashing.
+        """
+        replay_ctx = get_replay_context()
+        if replay_ctx is None:
+            logger.warning(
+                "HTTP replay: no ReplayContext active for %s %s — returning default 200",
+                http_method, url,
             )
+            return FakeResponse(200, "", {})
 
-        response_data = fixture.get("response", {})
+        ordinal = replay_ctx.next_http_ordinal(name)
+        result = replay_ctx.stub_store.get_http_stub(name, ordinal)
+
+        if result is None:
+            logger.warning(
+                "HTTP stub miss: %s %s name=%r ordinal=%d — returning default 200",
+                http_method, url, name, ordinal,
+            )
+            return FakeResponse(200, "", {})
+
+        _, response_data, _ = result
         fake_resp = FakeResponse(
             status_code=response_data.get("status_code", 200),
             body=response_data.get("body", ""),

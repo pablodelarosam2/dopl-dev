@@ -22,17 +22,15 @@ Only entries with ``event_type == "Stub"`` are indexed.  The top-level
 ``golden_output`` (``event_type == "Output"``) is not part of the stubs array
 and is never indexed here.
 
-Lookup methods raise SimStubMissError with diagnostic info on a miss.
+Lookup methods return None on miss — adapters decide miss behavior.
 
 Zero framework dependencies (Zone 1 compliant):
-  imports: json, pathlib, typing, .errors
+  imports: json, pathlib, typing
 """
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
-from .errors import SimStubMissError
+from typing import Any, Dict, List, Optional, Tuple
 
 _DB_PREFIX = "db:"
 _CAPTURE_PREFIX = "capture:"
@@ -98,7 +96,10 @@ class StubStore:
 
         if qualname.startswith(_DB_PREFIX):
             fp: str = stub.get("input_fingerprint", "")
-            self._db[(fp, ordinal)] = stub.get("output", [])
+            output = stub.get("output", [])
+            # Normalize null output to [] so None unambiguously signals a miss
+            # in get_db_stub (which uses dict.get() returning None on miss).
+            self._db[(fp, ordinal)] = output if output is not None else []
 
         elif qualname.startswith(_CAPTURE_PREFIX):
             label = qualname[len(_CAPTURE_PREFIX):]
@@ -122,11 +123,11 @@ class StubStore:
             self._trace[(fp, ordinal)] = stub
 
     # ------------------------------------------------------------------
-    # Public lookup API
+    # Public lookup API — returns None on miss, adapters decide behavior
     # ------------------------------------------------------------------
 
-    def get_db_stub(self, fp: str, ordinal: int) -> List[Dict]:
-        """Return recorded rows for a DB query.
+    def get_db_stub(self, fp: str, ordinal: int) -> Optional[List[Dict]]:
+        """Return recorded rows for a DB query, or None if not found.
 
         Args:
             fp: ``input_fingerprint`` from the FixtureEvent, formatted as
@@ -134,19 +135,12 @@ class StubStore:
             ordinal: 0-based call ordinal for this fingerprint.
 
         Returns:
-            List of row dicts as recorded.
-
-        Raises:
-            SimStubMissError: If no stub matches ``(fp, ordinal)``.
+            List of row dicts as recorded, or None on miss.
         """
-        key = (fp, ordinal)
-        if key not in self._db:
-            available = list({k[0] for k in self._db})
-            raise SimStubMissError("db", fp, ordinal, available)
-        return self._db[key]
+        return self._db.get((fp, ordinal))
 
-    def get_http_stub(self, fp: str, ordinal: int) -> Tuple[int, Dict, Dict]:
-        """Return recorded HTTP/capture response.
+    def get_http_stub(self, fp: str, ordinal: int) -> Optional[Tuple[int, Dict, Dict]]:
+        """Return recorded HTTP/capture response, or None if not found.
 
         Args:
             fp: Label string extracted from ``qualname`` after the prefix
@@ -154,33 +148,34 @@ class StubStore:
             ordinal: 0-based call ordinal for this label.
 
         Returns:
-            ``(status, body, headers)`` tuple as recorded.
-            Capture stubs default to ``status=200`` and ``headers={}``.
-
-        Raises:
-            SimStubMissError: If no stub matches ``(fp, ordinal)``.
+            ``(status, body, headers)`` tuple as recorded, or None on miss.
         """
-        key = (fp, ordinal)
-        if key not in self._http:
-            available = list({k[0] for k in self._http})
-            raise SimStubMissError("http", fp, ordinal, available)
-        return self._http[key]
+        return self._http.get((fp, ordinal))
 
-    def get_trace_stub(self, fp: str, ordinal: int) -> Dict:
-        """Return recorded internal trace payload for a nested @sim_trace call.
+    def get_trace_stub(self, fp: str, ordinal: int) -> Optional[Any]:
+        """Return recorded internal trace payload, or None if not found.
 
         Args:
             fp: ``input_fingerprint`` from the FixtureEvent.
             ordinal: 0-based call ordinal for this fingerprint.
 
         Returns:
-            Full FixtureEvent stub dict.
-
-        Raises:
-            SimStubMissError: If no stub matches ``(fp, ordinal)``.
+            Full FixtureEvent stub dict, or None on miss.
         """
-        key = (fp, ordinal)
-        if key not in self._trace:
-            available = list({k[0] for k in self._trace})
-            raise SimStubMissError("trace", fp, ordinal, available)
-        return self._trace[key]
+        return self._trace.get((fp, ordinal))
+
+    # ------------------------------------------------------------------
+    # Available fingerprint inspection
+    # ------------------------------------------------------------------
+
+    def available_db_fingerprints(self) -> List[str]:
+        """Return the unique fingerprints present in the DB index."""
+        return list({fp for fp, _ in self._db})
+
+    def available_http_fingerprints(self) -> List[str]:
+        """Return the unique labels present in the HTTP/capture index."""
+        return list({label for label, _ in self._http})
+
+    def available_trace_fingerprints(self) -> List[str]:
+        """Return the unique fingerprints present in the trace index."""
+        return list({fp for fp, _ in self._trace})

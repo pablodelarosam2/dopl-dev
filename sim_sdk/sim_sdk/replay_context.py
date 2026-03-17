@@ -105,25 +105,25 @@ class ReplayContext:
         """Emit debug-level warnings for stubs that were never consumed."""
         store = self.stub_store
 
-        for (fp, ordinal) in store._db:
-            if self.db_ordinals.get(fp, 0) <= ordinal:
+        for fp in store.available_db_fingerprints():
+            if self.db_ordinals.get(fp, 0) == 0:
                 _log.debug(
-                    "Unused db stub: fixture_id=%s fingerprint=%s ordinal=%d",
-                    self.fixture_id, fp, ordinal,
+                    "Unused db stub: fixture_id=%s fingerprint=%s",
+                    self.fixture_id, fp,
                 )
 
-        for (label, ordinal) in store._http:
-            if self.http_ordinals.get(label, 0) <= ordinal:
+        for label in store.available_http_fingerprints():
+            if self.http_ordinals.get(label, 0) == 0:
                 _log.debug(
-                    "Unused http stub: fixture_id=%s label=%s ordinal=%d",
-                    self.fixture_id, label, ordinal,
+                    "Unused http stub: fixture_id=%s label=%s",
+                    self.fixture_id, label,
                 )
 
-        for (fp, ordinal) in store._trace:
-            if self.trace_ordinals.get(fp, 0) <= ordinal:
+        for fp in store.available_trace_fingerprints():
+            if self.trace_ordinals.get(fp, 0) == 0:
                 _log.debug(
-                    "Unused trace stub: fixture_id=%s fingerprint=%s ordinal=%d",
-                    self.fixture_id, fp, ordinal,
+                    "Unused trace stub: fixture_id=%s fingerprint=%s",
+                    self.fixture_id, fp,
                 )
 
 
