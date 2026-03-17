@@ -30,6 +30,8 @@
       --font-code: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
     }
 
+    html { scroll-behavior: smooth; }
+
     /* ── Base ── */
     body {
       font-family: var(--font-body);
@@ -273,6 +275,30 @@
       font-size: 0.85rem;
     }
 
+    /* ── Nav ── */
+    .nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 1rem 2rem;
+      background: rgba(13, 17, 23, 0.8);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      font-family: var(--font-code);
+      font-weight: 700;
+      font-size: 1.25rem;
+      color: var(--accent-green);
+      text-decoration: none;
+    }
+    .nav-cta {
+      color: var(--accent-green);
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    .nav-cta:hover { color: var(--accent-green-hover); }
+
     /* ── Problem Statement ── */
     .problem { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
     .problem h2 { text-align: center; font-size: 2rem; margin-bottom: 0.75rem; }
@@ -334,9 +360,20 @@
       .mode-grid { grid-template-columns: 1fr; }
       .benefits-grid { grid-template-columns: 1fr; }
     }
+    @media (prefers-reduced-motion: reduce) {
+      .terminal-line { animation: none; opacity: 1; }
+      * { transition-duration: 0.01ms !important; }
+      html { scroll-behavior: auto; }
+    }
   </style>
 </head>
 <body>
+  <!-- Nav -->
+  <nav class="nav">
+    <a href="#hero" class="nav-logo">dopl</a>
+    <a href="#hero" class="nav-cta">Get Early Access</a>
+  </nav>
+
   <!-- Section 1: Hero -->
   <section id="hero" class="hero">
     <h1>Catch the bugs your tests miss</h1>
