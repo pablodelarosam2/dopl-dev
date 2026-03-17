@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>dopl — Catch the bugs your tests miss</title>
+  <meta name="description" content="dopl records real service interactions and replays them deterministically, catching '200 OK but wrong' regressions before production.">
+  <meta property="og:title" content="dopl — Catch the bugs your tests miss">
+  <meta property="og:description" content="dopl records real service interactions and replays them deterministically, catching '200 OK but wrong' regressions before production.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%233fb950'/><text x='16' y='22' text-anchor='middle' font-size='18' font-weight='bold' fill='white' font-family='sans-serif'>d</text></svg>">
+  <style>
+    /* ── Reset ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Custom Properties ── */
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --border: #30363d;
+      --text-primary: #c9d1d9;
+      --text-secondary: #9da5ae; /* bumped from #8b949e for WCAG AA compliance */
+      --accent-green: #3fb950;
+      --accent-green-hover: #2ea043;
+      --accent-blue: #58a6ff;
+      --accent-blue-hover: #79b8ff;
+      --accent-red: #f78166;
+      --accent-purple: #d2a8ff;
+      --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+      --font-code: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
+    }
+
+    /* ── Base ── */
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { color: var(--accent-blue-hover); }
+
+    h1, h2, h3 { font-weight: 700; line-height: 1.2; }
+
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden;
+      clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+
+    /* ── Responsive Skeleton ── */
+    @media (max-width: 1024px) {
+      /* tablet overrides go here */
+    }
+    @media (max-width: 767px) {
+      /* mobile overrides go here */
+    }
+  </style>
+</head>
+<body>
+  <!-- Section 1: Hero -->
+  <section id="hero"></section>
+
+  <!-- Section 2: Problem Statement -->
+  <section id="problem"></section>
+
+  <!-- Section 3: How It Works — Primitives -->
+  <section id="primitives"></section>
+
+  <!-- Section 4: Code Example -->
+  <section id="code-example"></section>
+
+  <!-- Section 5: Benefits -->
+  <section id="benefits"></section>
+
+  <!-- Section 6: Subscribe -->
+  <section id="subscribe"></section>
+</body>
+</html>
