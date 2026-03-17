@@ -158,9 +158,42 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
-    /* ── Responsive Skeleton ── */
+    /* ── Problem Statement ── */
+    .problem { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .problem h2 { text-align: center; font-size: 2rem; margin-bottom: 0.75rem; }
+    .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 2rem; }
+    .panel {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+    }
+    .panel-without { border-color: var(--accent-red); }
+    .panel-with { border-color: var(--accent-green); }
+    .panel h3 {
+      text-transform: uppercase;
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      margin-bottom: 1.25rem;
+      color: var(--text-secondary);
+    }
+    .panel-without h3 { color: var(--accent-red); }
+    .panel-with h3 { color: var(--accent-green); }
+    .checklist { list-style: none; }
+    .checklist li {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 0;
+      font-size: 0.95rem;
+    }
+    .checklist .icon-pass { color: var(--accent-green); }
+    .checklist .icon-fail { color: var(--accent-red); }
+    .checklist .fail-text { color: var(--accent-red); }
+
+    /* ── Responsive ── */
     @media (max-width: 1024px) {
-      /* tablet overrides go here */
+      .comparison { grid-template-columns: 1fr; }
     }
     @media (max-width: 767px) {
       .hero h1 { font-size: 2.25rem; }
@@ -190,7 +223,29 @@
   </section>
 
   <!-- Section 2: Problem Statement -->
-  <section id="problem"></section>
+  <section id="problem" class="problem">
+    <h2>The problem with '200 OK'</h2>
+    <div class="comparison">
+      <div class="panel panel-without">
+        <h3>Without dopl</h3>
+        <ul class="checklist">
+          <li><span class="icon-pass">✓</span> Unit tests pass</li>
+          <li><span class="icon-pass">✓</span> Integration tests pass</li>
+          <li><span class="icon-pass">✓</span> Deploy to production</li>
+          <li><span class="icon-fail">✗</span> <span class="fail-text">Customer reports wrong prices</span></li>
+        </ul>
+      </div>
+      <div class="panel panel-with">
+        <h3>With dopl</h3>
+        <ul class="checklist">
+          <li><span class="icon-pass">✓</span> Record baseline fixtures</li>
+          <li><span class="icon-pass">✓</span> Replay against PR</li>
+          <li><span class="icon-pass">✓</span> Diff caught wrong prices</li>
+          <li><span class="icon-pass">✓</span> Blocked before merge</li>
+        </ul>
+      </div>
+    </div>
+  </section>
 
   <!-- Section 3: How It Works — Primitives -->
   <section id="primitives"></section>
