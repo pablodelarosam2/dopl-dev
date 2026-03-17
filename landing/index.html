@@ -249,6 +249,30 @@
     .benefit h3 { font-size: 1.1rem; margin-bottom: 0.5rem; }
     .benefit p { color: var(--text-secondary); font-size: 0.9rem; }
 
+    /* ── Subscribe Footer ── */
+    .subscribe {
+      padding: 6rem 2rem;
+      background: var(--bg-secondary);
+      text-align: center;
+    }
+    .subscribe h2 { font-size: 2rem; margin-bottom: 0.75rem; }
+    .subscribe .subtitle { color: var(--text-secondary); margin-bottom: 2rem; }
+    .subscribe .subscribe-form { margin: 0 auto; }
+    .form-message {
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+      min-height: 1.5em;
+    }
+    .form-message.success { color: var(--accent-green); }
+    .form-message.error { color: var(--accent-red); }
+    .form-message.info { color: var(--accent-blue); }
+    footer {
+      padding: 2rem;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+    }
+
     /* ── Problem Statement ── */
     .problem { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
     .problem h2 { text-align: center; font-size: 2rem; margin-bottom: 0.75rem; }
@@ -490,9 +514,62 @@
   </section>
 
   <!-- Section 6: Subscribe -->
-  <section id="subscribe"></section>
+  <section id="subscribe" class="subscribe">
+    <h2>Stay in the loop</h2>
+    <p class="subtitle">We'll notify you when dopl is ready for early access. No spam.</p>
+    <form class="subscribe-form" aria-label="Subscribe for updates">
+      <label for="footer-email" class="sr-only">Email address</label>
+      <input type="email" id="footer-email" placeholder="your@email.com" required>
+      <button type="submit">Subscribe</button>
+    </form>
+    <div class="form-message"></div>
+  </section>
+
+  <footer>dopl — Deterministic Operation Persistence Layer</footer>
 
   <script>
+    // Subscribe form handler (shared by hero + footer forms)
+    function handleSubscribe(form) {
+      const input = form.querySelector('input[type="email"]');
+      const msg = form.nextElementSibling;
+      const email = input.value.trim();
+
+      if (!email) {
+        msg.textContent = 'Please enter your email address';
+        msg.className = 'form-message error';
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        msg.textContent = 'Please enter a valid email address';
+        msg.className = 'form-message error';
+        return;
+      }
+
+      try {
+        const subs = JSON.parse(localStorage.getItem('dopl_subscribers') || '[]');
+        if (subs.some(s => s.email === email)) {
+          msg.textContent = "You're already subscribed!";
+          msg.className = 'form-message info';
+          return;
+        }
+        subs.push({ email, timestamp: new Date().toISOString() });
+        localStorage.setItem('dopl_subscribers', JSON.stringify(subs));
+      } catch (e) {
+        console.warn('localStorage unavailable — email not persisted');
+      }
+
+      msg.textContent = "You're on the list! We'll be in touch.";
+      msg.className = 'form-message success';
+      input.value = '';
+    }
+
+    document.querySelectorAll('.subscribe-form').forEach(form => {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        handleSubscribe(form);
+      });
+    });
+
     // Tab switching
     document.querySelectorAll('[role="tab"]').forEach(tab => {
       tab.addEventListener('click', () => {
