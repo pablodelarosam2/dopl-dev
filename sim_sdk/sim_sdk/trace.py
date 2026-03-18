@@ -20,13 +20,12 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 from .context import SimContext, SimMode, get_context
 from .canonical import canonicalize_json, fingerprint
-from .errors import SimStubMissError
 from .fixture.schema import FixtureEvent
+from .replay_context import get_replay_context
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +35,6 @@ F = TypeVar("F", bound=Callable[..., Any])
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _fixture_key(qualname: str, input_fp: str, ordinal: int) -> str:
-    """Build the relative path key for a fixture file.
-
-    Layout: {safe_qualname}/{fingerprint_short}_{ordinal}.json
-    """
-    safe_name = qualname.replace(".", "_").replace("<", "").replace(">", "")
-    return f"{safe_name}/{input_fp[:16]}_{ordinal}.json"
-
 
 def _compute_fingerprint(qualname: str, args_data: Dict[str, Any]) -> str:
     """Stable fingerprint: SHA-256 of qualname + canonical(args)."""
@@ -78,50 +68,58 @@ def _make_serializable(value: Any) -> Any:
     return str(value)
 
 
-def _prepare_call(
-    func: Callable, qualname: str, args: tuple, kwargs: dict, ctx: SimContext,
+def _prepare_input(
+    func: Callable, qualname: str, args: tuple, kwargs: dict,
 ) -> tuple:
-    """Compute fingerprint and ordinal for a traced call.
+    """Compute args_data and input_fp for a traced call.
+
+    Ordinal is NOT computed here — record path calls ctx.next_ordinal();
+    replay path calls replay_ctx.next_trace_ordinal().
 
     Returns:
-        (args_data, input_fp, ordinal)
+        (args_data, input_fp)
     """
     args_data = _bind_args(func, args, kwargs)
     input_fp = _compute_fingerprint(qualname, args_data)
-    ordinal = ctx.next_ordinal(input_fp)
-    return args_data, input_fp, ordinal
+    return args_data, input_fp
 
 
 # -- Replay helpers ---------------------------------------------------------
 
-def _read_fixture(
-    qualname: str, input_fp: str, ordinal: int, stub_dir: Path,
-) -> Optional[Dict[str, Any]]:
-    """Read a recorded fixture from stub_dir by qualname + fingerprint + ordinal."""
-    key = _fixture_key(qualname, input_fp, ordinal)
-    filepath = stub_dir / key
-    if filepath.exists():
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
-
-
 def _replay(
     qualname: str,
     input_fp: str,
-    ordinal: int,
     args_data: Dict[str, Any],
     ctx: SimContext,
 ) -> Any:
-    """Look up recorded fixture and return its output."""
-    if ctx.stub_dir is None:
-        raise SimStubMissError("trace", input_fp, ordinal, [])
+    """Look up the recorded output via StubStore and return it directly.
 
-    fixture_data = _read_fixture(qualname, input_fp, ordinal, ctx.stub_dir)
-    if fixture_data is None:
-        raise SimStubMissError("trace", input_fp, ordinal, [])
+    The decorated function is NEVER executed in replay mode, including on a
+    miss — arbitrary side effects (DB writes, HTTP calls, state mutations)
+    must not run inside the replay sandbox.  On miss returns None and logs a
+    diagnostic; the caller (verifier) is responsible for detecting the gap.
+    """
+    replay_ctx = get_replay_context()
+    if replay_ctx is None:
+        logger.warning(
+            "sim_trace replay: no ReplayContext active for %r fp=%s"
+            " — function NOT executed, returning None",
+            qualname, input_fp[:16],
+        )
+        return None
 
-    output = fixture_data.get("output")
+    ordinal = replay_ctx.next_trace_ordinal(input_fp)
+    stub = replay_ctx.stub_store.get_trace_stub(input_fp, ordinal)
+
+    if stub is None:
+        logger.warning(
+            "sim_trace stub miss: %r fp=%s ordinal=%d"
+            " — function NOT executed, returning None",
+            qualname, input_fp[:16], ordinal,
+        )
+        return None
+
+    output = stub.get("output")
 
     if ctx.trace_depth > 0:
         ctx.collected_stubs.append({
@@ -223,11 +221,12 @@ def sim_trace(
                 if not ctx.is_active:
                     return await f(*args, **kwargs)
 
-                args_data, input_fp, ordinal = _prepare_call(f, qualname, args, kwargs, ctx)
+                args_data, input_fp = _prepare_input(f, qualname, args, kwargs)
 
                 if ctx.is_replaying:
-                    return _replay(qualname, input_fp, ordinal, args_data, ctx)
+                    return _replay(qualname, input_fp, args_data, ctx)
 
+                ordinal = ctx.next_ordinal(input_fp)
                 ctx.trace_depth += 1
                 stubs_snapshot = len(ctx.collected_stubs)
                 start = time.time()
@@ -256,11 +255,12 @@ def sim_trace(
                 if not ctx.is_active:
                     return f(*args, **kwargs)
 
-                args_data, input_fp, ordinal = _prepare_call(f, qualname, args, kwargs, ctx)
+                args_data, input_fp = _prepare_input(f, qualname, args, kwargs)
 
                 if ctx.is_replaying:
-                    return _replay(qualname, input_fp, ordinal, args_data, ctx)
+                    return _replay(qualname, input_fp, args_data, ctx)
 
+                ordinal = ctx.next_ordinal(input_fp)
                 ctx.trace_depth += 1
                 stubs_snapshot = len(ctx.collected_stubs)
                 start = time.time()

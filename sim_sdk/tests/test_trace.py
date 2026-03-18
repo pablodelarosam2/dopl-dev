@@ -1,11 +1,11 @@
 """
 Tests for @sim_trace decorator using plain Python functions.
 
-Covers all T3 acceptance criteria:
+Covers all acceptance criteria:
   1. Off mode: function behaves identically
-  2. Record mode: function executes, fixture event emitted
-  3. Replay mode: function body NOT executed, recorded output returned
-  4. Replay mode: SimStubMissError raised with diagnostics
+  2. Record mode: function executes, FixtureEvent emitted to sink
+  3. Replay mode: function body NOT executed, recorded output returned via StubStore
+  4. Replay stub miss: returns None, function NOT executed, warning logged
   5. Works on plain sync functions
   6. Works on async functions
   7. Nested @sim_trace: inner results become stubs of outer
@@ -16,48 +16,43 @@ Covers all T3 acceptance criteria:
 import asyncio
 import inspect
 import json
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from sim_sdk.context import SimContext, SimMode, get_context, set_context, clear_context
 from sim_sdk.fixture.schema import FixtureEvent
-from sim_sdk.sink import RecordSink
+from sim_sdk.replay_context import ReplayContext
 from sim_sdk.trace import (
     sim_trace,
-    SimStubMissError,
     _compute_fingerprint,
-    _fixture_key,
     _make_serializable,
 )
 
 
 # ---------------------------------------------------------------------------
-# Test sink — writes FixtureEvents to a directory so replay can read them
+# CollectSink — in-memory sink for assertions and fixture.json export
 # ---------------------------------------------------------------------------
 
-class StubDirSink(RecordSink):
-    """Minimal sink for tests: writes fixture events as JSON files to stub_dir.
+class CollectSink:
+    """In-memory sink that collects FixtureEvents and can write a fixture.json."""
 
-    max_batch_events=1 so every event is persisted immediately without
-    waiting for a batch to fill up.
-    """
+    def __init__(self):
+        self.events: list = []
 
-    def __init__(self, stub_dir: Path):
-        super().__init__(max_batch_events=1)
-        self.stub_dir = stub_dir
-        self.events: list[FixtureEvent] = []
+    def emit(self, event: FixtureEvent) -> None:
+        self.events.append(event)
 
-    def _persist_batch(self, batch: list[FixtureEvent]) -> None:
-        for event in batch:
-            self.events.append(event)
-            key = _fixture_key(event.qualname, event.input_fingerprint, event.ordinal)
-            filepath = self.stub_dir / key
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(event.to_dict(), f, indent=2, default=str)
+    def to_fixture_json(self, fixture_dir: Path, fixture_id: str) -> None:
+        """Write all collected events to a StubStore-compatible fixture.json."""
+        fixture_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "schema_version": 1,
+            "stubs": [e.to_dict() for e in self.events],
+        }
+        (fixture_dir / f"{fixture_id}.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -72,25 +67,17 @@ def clean_context():
     clear_context()
 
 
-@pytest.fixture
-def stub_dir():
-    """Provide a temporary directory for fixture files."""
-    dirpath = tempfile.mkdtemp()
-    yield Path(dirpath)
-    shutil.rmtree(dirpath)
-
-
-def make_record_ctx(stub_dir: Path) -> SimContext:
-    """Create a record-mode context with a StubDirSink."""
-    sink = StubDirSink(stub_dir)
-    ctx = SimContext(mode=SimMode.RECORD, run_id="test-run", stub_dir=stub_dir, sink=sink)
+def make_record_ctx(run_id: str = "test-run"):
+    """Create a record-mode SimContext with a CollectSink. Returns (ctx, sink)."""
+    sink = CollectSink()
+    ctx = SimContext(mode=SimMode.RECORD, run_id=run_id, sink=sink)
     set_context(ctx)
-    return ctx
+    return ctx, sink
 
 
-def make_replay_ctx(stub_dir: Path) -> SimContext:
-    """Create a replay-mode context pointing at stub_dir."""
-    ctx = SimContext(mode=SimMode.REPLAY, run_id="test-run", stub_dir=stub_dir)
+def make_replay_sim_ctx(run_id: str = "test-run") -> SimContext:
+    """Set a SimContext in REPLAY mode. Stub lookup is via ReplayContext/StubStore."""
+    ctx = SimContext(mode=SimMode.REPLAY, run_id=run_id)
     set_context(ctx)
     return ctx
 
@@ -106,13 +93,12 @@ class TestOffMode:
         def add(a, b):
             return a + b
 
-        # Default context is OFF
         result = add(2, 3)
         assert result == 5
 
-    def test_no_side_effects(self, stub_dir):
-        """No fixture files created when mode is off."""
-        ctx = SimContext(mode=SimMode.OFF, run_id="test", stub_dir=stub_dir)
+    def test_no_events_emitted(self):
+        """No FixtureEvents emitted when mode is off."""
+        ctx = SimContext(mode=SimMode.OFF, run_id="test")
         set_context(ctx)
 
         @sim_trace
@@ -120,10 +106,7 @@ class TestOffMode:
             return a + b
 
         add(2, 3)
-
-        # stub_dir should remain empty
-        files = list(stub_dir.rglob("*.json"))
-        assert files == []
+        assert ctx.collected_stubs == []
 
     def test_exception_passthrough(self):
         """Exceptions propagate normally in off mode."""
@@ -136,11 +119,11 @@ class TestOffMode:
 
 
 # ---------------------------------------------------------------------------
-# AC2: Record mode — function executes, fixture emitted
+# AC2: Record mode — function executes, FixtureEvent emitted to sink
 # ---------------------------------------------------------------------------
 
 class TestRecordMode:
-    def test_function_executes(self, stub_dir):
+    def test_function_executes(self):
         """Function body actually runs in record mode."""
         call_log = []
 
@@ -149,72 +132,60 @@ class TestRecordMode:
             call_log.append((a, b))
             return a + b
 
-        make_record_ctx(stub_dir)
+        make_record_ctx()
         result = add(2, 3)
 
         assert result == 5
         assert call_log == [(2, 3)]
 
-    def test_fixture_file_written(self, stub_dir):
-        """A fixture JSON file is written to stub_dir."""
+    def test_event_emitted_to_sink(self):
+        """One FixtureEvent is emitted per function call."""
         @sim_trace
         def add(a, b):
             return a + b
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         add(2, 3)
 
-        files = list(stub_dir.rglob("*.json"))
-        assert len(files) == 1
+        assert len(sink.events) == 1
 
-    def test_fixture_contents(self, stub_dir):
-        """Fixture file contains correct input, output, and metadata."""
+    def test_event_contents(self):
+        """Emitted event has correct input, output, qualname, run_id."""
         @sim_trace
         def multiply(a, b):
             return a * b
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         multiply(4, 5)
 
-        files = list(stub_dir.rglob("*.json"))
-        assert len(files) == 1
+        event = sink.events[0]
+        assert event.input["a"] == 4
+        assert event.input["b"] == 5
+        assert event.output == 20
+        assert event.run_id == "test-run"
+        assert event.error is None
+        assert event.input_fingerprint != ""
+        assert event.output_fingerprint != ""
+        assert event.duration_ms >= 0
 
-        with open(files[0]) as f:
-            data = json.load(f)
-
-        assert data["input"]["a"] == 4
-        assert data["input"]["b"] == 5
-        assert data["output"] == 20
-        assert data["run_id"] == "test-run"
-        assert data["error"] is None
-        assert "qualname" in data
-        assert "input_fingerprint" in data
-        assert "output_fingerprint" in data
-        assert data["duration_ms"] >= 0
-
-    def test_exception_recorded(self, stub_dir):
-        """Exception is recorded in the fixture's error field."""
+    def test_exception_recorded(self):
+        """Exception is recorded in the event's error field."""
         @sim_trace
         def failing(x):
             raise RuntimeError(f"bad input: {x}")
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
 
         with pytest.raises(RuntimeError, match="bad input: 42"):
             failing(42)
 
-        files = list(stub_dir.rglob("*.json"))
-        assert len(files) == 1
-
-        with open(files[0]) as f:
-            data = json.load(f)
-
-        assert data["error"] is not None
-        assert "RuntimeError" in data["error"]
-        assert "bad input: 42" in data["error"]
+        assert len(sink.events) == 1
+        assert sink.events[0].error is not None
+        assert "RuntimeError" in sink.events[0].error
+        assert "bad input: 42" in sink.events[0].error
 
     def test_no_sink_configured(self):
-        """When no sink is set, fixture is silently discarded."""
+        """When no sink is set, function still executes and returns correctly."""
         ctx = SimContext(mode=SimMode.RECORD, run_id="test")
         set_context(ctx)
 
@@ -227,11 +198,11 @@ class TestRecordMode:
 
 
 # ---------------------------------------------------------------------------
-# AC3: Replay mode — body NOT executed, recorded output returned
+# AC3: Replay mode — body NOT executed, recorded output returned via StubStore
 # ---------------------------------------------------------------------------
 
 class TestReplayMode:
-    def test_skips_body(self, stub_dir):
+    def test_skips_body(self, tmp_path):
         """Function body does NOT execute in replay mode."""
         call_log = []
 
@@ -240,82 +211,134 @@ class TestReplayMode:
             call_log.append("called")
             return a + b
 
-        # Record first
-        make_record_ctx(stub_dir)
+        # Record
+        ctx, sink = make_record_ctx()
         add(2, 3)
         assert call_log == ["called"]
+        sink.to_fixture_json(tmp_path, "fix")
 
         # Replay — body should NOT run again
         call_log.clear()
         clear_context()
-        make_replay_ctx(stub_dir)
-        result = add(2, 3)
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = add(2, 3)
 
         assert result == 5
-        assert call_log == []  # Body was skipped
+        assert call_log == []
 
-    def test_returns_recorded_output(self, stub_dir):
+    def test_returns_recorded_output(self, tmp_path):
         """Replay returns the exact recorded output."""
         @sim_trace
         def greet(name):
             return f"Hello, {name}!"
 
-        # Record
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         greet("Alice")
+        sink.to_fixture_json(tmp_path, "fix")
 
-        # Replay
         clear_context()
-        make_replay_ctx(stub_dir)
-        result = greet("Alice")
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = greet("Alice")
 
         assert result == "Hello, Alice!"
 
+    def test_returns_complex_output(self, tmp_path):
+        """Replay returns complex dict/list output correctly."""
+        @sim_trace
+        def compute(x, y):
+            return {"sum": x + y, "product": x * y}
+
+        ctx, sink = make_record_ctx()
+        compute(3, 7)
+        sink.to_fixture_json(tmp_path, "fix")
+
+        clear_context()
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = compute(3, 7)
+
+        assert result == {"sum": 10, "product": 21}
+
 
 # ---------------------------------------------------------------------------
-# AC4: Replay — SimStubMissError with diagnostics
+# AC4: Replay stub miss — returns None, function NOT executed
 # ---------------------------------------------------------------------------
 
 class TestReplayStubMiss:
-    def test_raises_when_no_fixture(self, stub_dir):
-        """SimStubMissError raised when no recorded fixture exists."""
+    def test_no_replay_context_returns_none(self):
+        """Returns None when no ReplayContext is active."""
+        call_log = []
+
+        @sim_trace
+        def add(a, b):
+            call_log.append("called")
+            return a + b
+
+        make_replay_sim_ctx()
+        result = add(2, 3)
+
+        assert result is None
+        assert call_log == []  # Function NOT executed
+
+    def test_stub_miss_returns_none(self, tmp_path):
+        """Returns None when fixture exists but has no matching stub."""
         @sim_trace
         def add(a, b):
             return a + b
 
-        make_replay_ctx(stub_dir)
+        # Write fixture for different args (3, 4) — not (1, 2)
+        ctx, sink = make_record_ctx()
+        add(3, 4)
+        sink.to_fixture_json(tmp_path, "fix")
 
-        with pytest.raises(SimStubMissError):
-            add(2, 3)
+        call_log = []
 
-    def test_diagnostics_in_error(self, stub_dir):
-        """Error message contains qualname, fingerprint, and expected path."""
+        @sim_trace
+        def add_tracked(a, b):
+            call_log.append("called")
+            return a + b
+
+        clear_context()
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = add_tracked(1, 2)  # Different func — no matching stub
+
+        assert result is None
+        assert call_log == []  # Function NOT executed
+
+    def test_function_never_executes_on_miss(self):
+        """Even on miss, the decorated function body is never called."""
+        side_effects = []
+
+        @sim_trace
+        def mutating_func(x):
+            side_effects.append(x)  # Side effect that must NOT happen in replay
+            return x * 2
+
+        make_replay_sim_ctx()
+        result = mutating_func(42)
+
+        assert result is None
+        assert side_effects == []  # No side effects triggered
+
+    def test_miss_returns_none_not_raises(self, tmp_path):
+        """Stub miss is silent — returns None, no exception raised."""
         @sim_trace
         def add(a, b):
             return a + b
 
-        make_replay_ctx(stub_dir)
+        # Empty fixture — no stubs at all
+        (tmp_path / "fix.json").write_text(
+            json.dumps({"schema_version": 1, "stubs": []}), encoding="utf-8"
+        )
+        make_replay_sim_ctx()
 
-        with pytest.raises(SimStubMissError) as exc_info:
-            add(99, 1)
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = add(1, 2)  # Should not raise
 
-        err = exc_info.value
-        assert err.stub_type == "trace"
-        assert err.ordinal == 0
-        assert len(err.fingerprint) == 64  # SHA-256 hex
-        assert "trace" in str(err)
-
-    def test_raises_when_no_stub_dir(self):
-        """SimStubMissError raised when stub_dir is None."""
-        ctx = SimContext(mode=SimMode.REPLAY, run_id="test")
-        set_context(ctx)
-
-        @sim_trace
-        def add(a, b):
-            return a + b
-
-        with pytest.raises(SimStubMissError):
-            add(1, 2)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -331,23 +354,23 @@ class TestSyncFunctions:
 
         assert add(10, 20) == 30
 
-    def test_function_with_defaults(self, stub_dir):
+    def test_function_with_defaults(self):
         """Works with default arguments."""
         @sim_trace
         def greet(name, greeting="Hello"):
             return f"{greeting}, {name}!"
 
-        make_record_ctx(stub_dir)
+        make_record_ctx()
         result = greet("World")
         assert result == "Hello, World!"
 
-    def test_function_with_kwargs(self, stub_dir):
+    def test_function_with_kwargs(self):
         """Works with keyword arguments."""
         @sim_trace
         def build(name, **opts):
             return {"name": name, **opts}
 
-        make_record_ctx(stub_dir)
+        make_record_ctx()
         result = build("test", color="red", size=5)
         assert result == {"name": "test", "color": "red", "size": 5}
 
@@ -366,8 +389,8 @@ class TestAsyncFunctions:
         result = asyncio.run(async_add(2, 3))
         assert result == 5
 
-    def test_async_record_mode(self, stub_dir):
-        """Async function recorded correctly."""
+    def test_async_record_mode(self):
+        """Async function emits FixtureEvent on record."""
         call_log = []
 
         @sim_trace
@@ -375,17 +398,16 @@ class TestAsyncFunctions:
             call_log.append("called")
             return a * b
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         result = asyncio.run(async_multiply(4, 5))
 
         assert result == 20
         assert call_log == ["called"]
+        assert len(sink.events) == 1
+        assert sink.events[0].output == 20
 
-        files = list(stub_dir.rglob("*.json"))
-        assert len(files) == 1
-
-    def test_async_replay_mode(self, stub_dir):
-        """Async function replayed — body skipped."""
+    def test_async_replay_mode(self, tmp_path):
+        """Async function body is skipped in replay; recorded output returned."""
         call_log = []
 
         @sim_trace
@@ -394,18 +416,20 @@ class TestAsyncFunctions:
             return a + b
 
         # Record
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         asyncio.run(async_add(10, 20))
         assert call_log == ["called"]
+        sink.to_fixture_json(tmp_path, "fix")
 
         # Replay
         call_log.clear()
         clear_context()
-        make_replay_ctx(stub_dir)
-        result = asyncio.run(async_add(10, 20))
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = asyncio.run(async_add(10, 20))
 
         assert result == 30
-        assert call_log == []  # Body skipped
+        assert call_log == []
 
 
 # ---------------------------------------------------------------------------
@@ -413,8 +437,8 @@ class TestAsyncFunctions:
 # ---------------------------------------------------------------------------
 
 class TestNestedTraces:
-    def test_inner_becomes_stub(self, stub_dir):
-        """Inner @sim_trace result appears in outer fixture's stubs list."""
+    def test_inner_becomes_stub(self):
+        """Inner @sim_trace result appears in outer event's stubs list."""
         @sim_trace
         def inner(x):
             return x * 2
@@ -423,28 +447,52 @@ class TestNestedTraces:
         def outer(x):
             return inner(x) + 1
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         result = outer(5)
         assert result == 11
 
-        # Find the outer fixture (it should have stubs)
-        files = list(stub_dir.rglob("*.json"))
-        # Should have 2 fixtures: one for inner, one for outer
-        assert len(files) == 2
+        # Two events emitted: one for inner, one for outer
+        assert len(sink.events) == 2
 
-        # Find the outer one (the one with stubs)
-        outer_fixture = None
-        for fpath in files:
-            with open(fpath) as f:
-                data = json.load(f)
-            if data.get("stubs"):
-                outer_fixture = data
-                break
+        # Outer event is the last emitted
+        outer_event = next(e for e in sink.events if e.stubs)
+        assert outer_event.output == 11
+        assert len(outer_event.stubs) == 1
+        assert outer_event.stubs[0]["output"] == 10  # inner(5) = 10
 
-        assert outer_fixture is not None, "Outer fixture should have stubs"
-        assert len(outer_fixture["stubs"]) == 1
-        assert outer_fixture["stubs"][0]["output"] == 10  # inner(5) = 10
-        assert outer_fixture["output"] == 11  # inner(5) + 1 = 11
+    def test_nested_replay(self, tmp_path):
+        """Nested @sim_trace replays correctly — outer body skipped entirely."""
+        outer_log = []
+        inner_log = []
+
+        @sim_trace
+        def inner(x):
+            inner_log.append(x)
+            return x * 2
+
+        @sim_trace
+        def outer(x):
+            outer_log.append(x)
+            return inner(x) + 1
+
+        # Record
+        ctx, sink = make_record_ctx()
+        outer(5)
+        assert outer_log == [5]
+        assert inner_log == [5]
+        sink.to_fixture_json(tmp_path, "fix")
+
+        # Replay — outer body (and thus inner) should NOT execute
+        outer_log.clear()
+        inner_log.clear()
+        clear_context()
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = outer(5)
+
+        assert result == 11
+        assert outer_log == []  # outer body skipped
+        assert inner_log == []  # inner never called
 
 
 # ---------------------------------------------------------------------------
@@ -470,26 +518,34 @@ class TestFingerprinting:
         fp2 = _compute_fingerprint("func_b", {"x": 1})
         assert fp1 != fp2
 
-    def test_ordinal_tracking(self, stub_dir):
-        """Same function+args called twice gets ordinal 0 then 1."""
+    def test_ordinal_tracking(self):
+        """Same function+args called twice gets ordinal 0 then 1 in emitted events."""
         @sim_trace
         def add(a, b):
             return a + b
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         add(1, 2)
         add(1, 2)  # Same args again
 
-        files = sorted(stub_dir.rglob("*.json"))
-        assert len(files) == 2
-
-        with open(files[0]) as f:
-            d0 = json.load(f)
-        with open(files[1]) as f:
-            d1 = json.load(f)
-
-        ordinals = sorted([d0["ordinal"], d1["ordinal"]])
+        assert len(sink.events) == 2
+        ordinals = sorted(e.ordinal for e in sink.events)
         assert ordinals == [0, 1]
+
+    def test_different_args_different_ordinal_sequence(self):
+        """Different args start their own ordinal sequence independently."""
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        add(1, 2)  # fp_A ordinal 0
+        add(3, 4)  # fp_B ordinal 0
+        add(1, 2)  # fp_A ordinal 1
+
+        assert len(sink.events) == 3
+        ordinals = [e.ordinal for e in sink.events]
+        assert ordinals == [0, 0, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -507,17 +563,21 @@ class TestZeroDependencies:
             "httpx", "aiohttp", "psycopg2", "sqlalchemy", "asyncpg",
         ]
         for module in banned:
-            assert f"import {module}" not in source, f"trace.py imports banned module: {module}"
-            assert f"from {module}" not in source, f"trace.py imports banned module: {module}"
+            assert f"import {module}" not in source, (
+                f"trace.py imports banned module: {module}"
+            )
+            assert f"from {module}" not in source, (
+                f"trace.py imports banned module: {module}"
+            )
 
 
 # ---------------------------------------------------------------------------
-# General: decorator behavior
+# Decorator behavior
 # ---------------------------------------------------------------------------
 
 class TestDecoratorBehavior:
     def test_preserves_function_name(self):
-        """functools.wraps preserves __name__."""
+        """functools.wraps preserves __name__ and __doc__."""
         @sim_trace
         def my_function(x):
             """My docstring."""
@@ -526,22 +586,17 @@ class TestDecoratorBehavior:
         assert my_function.__name__ == "my_function"
         assert my_function.__doc__ == "My docstring."
 
-    def test_custom_name(self, stub_dir):
-        """@sim_trace(name="custom") uses custom qualname."""
+    def test_custom_name(self):
+        """@sim_trace(name="custom") uses custom qualname in emitted event."""
         @sim_trace(name="pricing.quote")
         def calculate(items):
             return sum(items)
 
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         calculate([10, 20, 30])
 
-        files = list(stub_dir.rglob("*.json"))
-        assert len(files) == 1
-
-        with open(files[0]) as f:
-            data = json.load(f)
-
-        assert data["qualname"] == "pricing.quote"
+        assert len(sink.events) == 1
+        assert sink.events[0].qualname == "pricing.quote"
 
     def test_both_decorator_syntaxes(self):
         """Both @sim_trace and @sim_trace() work."""
@@ -566,40 +621,68 @@ class TestDecoratorBehavior:
 
 
 # ---------------------------------------------------------------------------
-# Integration: record → replay roundtrip
+# Integration: record → replay round-trip via ReplayContext
 # ---------------------------------------------------------------------------
 
 class TestRoundtrip:
-    def test_record_then_replay(self, stub_dir):
-        """Full record → replay cycle: record output, replay returns it."""
+    def test_record_then_replay(self, tmp_path):
+        """Full record → fixture.json → ReplayContext → replay cycle."""
         @sim_trace
         def compute(x, y):
             return {"sum": x + y, "product": x * y}
 
-        # Record phase
-        make_record_ctx(stub_dir)
+        # Record
+        ctx, sink = make_record_ctx()
         recorded = compute(3, 7)
         assert recorded == {"sum": 10, "product": 21}
+        sink.to_fixture_json(tmp_path, "fix")
 
-        # Replay phase
+        # Replay
         clear_context()
-        make_replay_ctx(stub_dir)
-        replayed = compute(3, 7)
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            replayed = compute(3, 7)
+
         assert replayed == {"sum": 10, "product": 21}
 
-    def test_record_then_replay_different_args_miss(self, stub_dir):
-        """Replay with different args raises SimStubMissError."""
+    def test_different_args_miss_returns_none(self, tmp_path):
+        """Replay with different args produces a miss and returns None."""
         @sim_trace
         def add(a, b):
             return a + b
 
         # Record with (1, 2)
-        make_record_ctx(stub_dir)
+        ctx, sink = make_record_ctx()
         add(1, 2)
+        sink.to_fixture_json(tmp_path, "fix")
 
-        # Replay with (3, 4) — different args, no fixture
+        # Replay with (3, 4) — different fingerprint, no stub
         clear_context()
-        make_replay_ctx(stub_dir)
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            result = add(3, 4)
 
-        with pytest.raises(SimStubMissError):
-            add(3, 4)
+        assert result is None
+
+    def test_multiple_ordinals_replay_in_order(self, tmp_path):
+        """Multiple calls with same args are replayed in ordinal order."""
+        results_recorded = []
+
+        @sim_trace
+        def next_value(seed):
+            results_recorded.append(len(results_recorded))
+            return len(results_recorded)
+
+        ctx, sink = make_record_ctx()
+        next_value(0)  # ordinal 0 → 1
+        next_value(0)  # ordinal 1 → 2
+        sink.to_fixture_json(tmp_path, "fix")
+
+        clear_context()
+        make_replay_sim_ctx()
+        with ReplayContext(fixture_id="fix", fixture_dir=str(tmp_path)):
+            r1 = next_value(0)
+            r2 = next_value(0)
+
+        assert r1 == 1
+        assert r2 == 2
