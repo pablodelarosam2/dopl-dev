@@ -20,22 +20,32 @@ Usage:
       -d '{"user_id": 1, "items": [{"sku": "WIDGET-A", "qty": 2}]}'
 
     # 3. Replay mode — same response, zero I/O
-    SIM_MODE=replay python3 app.py
+    SIM_MODE=replay SIM_STUB_DIR=../sim_sdk/tests/fixtures python3 app.py
     curl -s -X POST http://localhost:5050/quote \
       -H "Content-Type: application/json" \
+      -H "x-sim-fixture-name: calculate_quote" \
       -d '{"user_id": 1, "items": [{"sku": "WIDGET-A", "qty": 2}]}'
+
+    # Or use sim-replay CLI (from sim_sdk/ dir):
+    python3 -m sim_runner.replay_cli \
+      --fixture-dir tests/fixtures \
+      --port 5050 \
+      --path /quote \
+      --output-dir ./replay_results
 """
 
 import atexit
 import json
+import logging
 import os
 import sqlite3
 import uuid
 from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 from sim_sdk.context import SimContext, SimMode, set_context, clear_context, get_context
+from sim_sdk.replay_context import ReplayContext
 from sim_sdk.trace import sim_trace
 from sim_sdk.capture import sim_capture
 from sim_sdk.db import sim_db
@@ -49,7 +59,7 @@ from sim_sdk.sink.record_sink import RecordSink
 
 SIM_MODE_STR = os.environ.get("SIM_MODE", "off").lower()
 SERVICE_NAME = os.environ.get("DOPL_SERVICE", "flask-demo")
-STUB_DIR = Path(".sim/fixtures")
+STUB_DIR = Path(os.environ.get("SIM_STUB_DIR", ".sim/fixtures"))
 DB_PATH = os.environ.get("DB_PATH", ":memory:")
 
 
@@ -216,9 +226,24 @@ def before_sim():
     ctx.start_new_request()
     set_context(ctx)
 
+    if mode == SimMode.REPLAY:
+        fixture_name = request.headers.get("x-sim-fixture-name")
+        if fixture_name:
+            try:
+                replay_ctx = ReplayContext(fixture_id=fixture_name, fixture_dir=str(STUB_DIR))
+                replay_ctx.__enter__()
+                g.replay_ctx = replay_ctx
+            except FileNotFoundError as exc:
+                logging.getLogger(__name__).error(
+                    "Fixture not found for x-sim-fixture-name=%r: %s", fixture_name, exc
+                )
+
 
 @app.after_request
 def after_sim(response):
+    replay_ctx = getattr(g, "replay_ctx", None)
+    if replay_ctx is not None:
+        replay_ctx.__exit__(None, None, None)
     clear_context()
     return response
 

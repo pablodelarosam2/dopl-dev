@@ -30,6 +30,7 @@ dependencies = [
 
 [project.scripts]
 sim-run = "sim_sdk.runner:main"
+sim-replay = "sim_runner.replay_cli:main"
 
 [project.optional-dependencies]
 dev = [

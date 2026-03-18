@@ -78,6 +78,14 @@ class StubStore:
 
         store = cls()
         store._index_stubs(data.get("stubs", []))
+
+        # The top-level golden_output holds the recorded return value of the
+        # root @sim_trace function.  Index it into _trace so get_trace_stub()
+        # can serve it during replay.
+        golden_output = data.get("golden_output")
+        if golden_output is not None:
+            store._index_fixture_event(golden_output)
+
         return store
 
     # ------------------------------------------------------------------
