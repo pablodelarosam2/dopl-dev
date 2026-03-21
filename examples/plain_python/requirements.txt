@@ -1,4 +1,2 @@
-flask>=2.0
-
 # sim_sdk — editable install from the repo
 -e ../../sim_sdk
