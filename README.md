@@ -258,8 +258,10 @@ python3 -m venv .venv
 source .venv/bin/activate    # macOS/Linux
 # .venv\Scripts\activate     # Windows
 
-# Install the SDK in editable mode
-pip install -e "./sim_sdk[dev]"
+# Install the SDK in editable mode (cd into sim_sdk first — zsh treats [] as globs)
+cd sim_sdk
+pip install -e ".[dev]"
+cd ..
 
 # Install the Flask example dependencies
 pip install -r examples/flask_app/requirements.txt
