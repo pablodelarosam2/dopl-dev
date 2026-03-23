@@ -882,3 +882,33 @@ class TestRunIndexer:
 
         # No assertions on log output — just verify it didn't crash.
         # Structured logging verification would require a log capture fixture.
+
+
+class TestMain:
+    """Tests for the indexer __main__ entrypoint."""
+
+    @patch("fixture_service.__main__.psycopg2")
+    @patch("fixture_service.__main__.boto3")
+    @patch("fixture_service.__main__.IndexerConfig")
+    @patch("fixture_service.__main__.run_indexer")
+    def test_main_wires_dependencies(self, mock_run, mock_config_cls, mock_boto3, mock_psycopg2):
+        """main() creates clients, config, and calls run_indexer."""
+        from fixture_service.__main__ import main
+
+        mock_config = MagicMock()
+        mock_config.aws_region = "us-east-1"
+        mock_config.database_url = "postgresql://test"
+        mock_config_cls.from_env.return_value = mock_config
+
+        mock_run.side_effect = KeyboardInterrupt()
+
+        main()
+
+        # Config loaded from env
+        mock_config_cls.from_env.assert_called_once()
+        # boto3 clients created
+        assert mock_boto3.client.call_count == 2  # s3 + sqs
+        # Postgres connection opened
+        mock_psycopg2.connect.assert_called_once_with(mock_config.database_url)
+        # run_indexer called
+        mock_run.assert_called_once()
