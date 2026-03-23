@@ -299,3 +299,47 @@ def is_duplicate(cursor: Any, content_hash: str, window_hours: int) -> bool:
         (content_hash, window_hours),
     )
     return cursor.fetchone() is not None
+
+
+# ---------------------------------------------------------------------------
+# Index Row Insert
+# ---------------------------------------------------------------------------
+
+def insert_index_row(
+    cursor: Any,
+    metadata: FixtureMetadata,
+    s3_key: str,
+    content_hash: str,
+    s3_bucket: str,
+) -> None:
+    """Insert a fixture index row into Postgres.
+
+    Args:
+        cursor: A psycopg2 cursor (or mock).
+        metadata: Extracted fixture metadata.
+        s3_key: Full S3 object key.
+        content_hash: SHA-256 hex digest of the canonical fixture.
+        s3_bucket: S3 bucket name (used to construct s3_uri).
+    """
+    s3_uri = f"s3://{s3_bucket}/{s3_key}"
+    tags_json = json.dumps(metadata.tags, sort_keys=True)
+
+    cursor.execute(
+        """
+        INSERT INTO fixtures_index
+            (service, method, path, endpoint_key, content_hash, s3_uri, recorded_at, tags)
+        VALUES
+            (%(service)s, %(method)s, %(path)s, %(endpoint_key)s, %(content_hash)s,
+             %(s3_uri)s, %(recorded_at)s, %(tags)s)
+        """,
+        {
+            "service": metadata.service,
+            "method": metadata.method,
+            "path": metadata.path,
+            "endpoint_key": metadata.endpoint_key,
+            "content_hash": content_hash,
+            "s3_uri": s3_uri,
+            "recorded_at": metadata.recorded_at,
+            "tags": tags_json,
+        },
+    )

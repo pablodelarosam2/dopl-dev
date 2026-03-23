@@ -434,3 +434,89 @@ class TestIsDuplicate:
 
         params = mock_cursor.execute.call_args[0][1]
         assert params[1] == 24
+
+
+class TestInsertIndexRow:
+    """Tests for insert_index_row — inserts a row into fixtures_index."""
+
+    def test_inserts_all_columns(self):
+        """Inserts a row with all required columns."""
+        from fixture_service.indexer import insert_index_row, FixtureMetadata
+
+        mock_cursor = MagicMock()
+        meta = FixtureMetadata(
+            service="pricing-api",
+            method="POST",
+            path="/quote",
+            endpoint_key="post_quote",
+            recorded_at="2026-03-21T14:30:00Z",
+            tags={"scenario": "premium"},
+            fixture_id="abc123",
+        )
+
+        insert_index_row(
+            mock_cursor,
+            meta,
+            s3_key="fixtures/pricing-api/post_quote/2026-03-21/abc123.json",
+            content_hash="deadbeef" * 8,
+            s3_bucket="fixtures-bucket",
+        )
+
+        mock_cursor.execute.assert_called_once()
+        sql = mock_cursor.execute.call_args[0][0]
+        params = mock_cursor.execute.call_args[0][1]
+
+        # Verify SQL targets the right table and columns
+        assert "INSERT INTO fixtures_index" in sql
+        assert "service" in sql
+        assert "method" in sql
+        assert "path" in sql
+        assert "endpoint_key" in sql
+        assert "content_hash" in sql
+        assert "s3_uri" in sql
+        assert "recorded_at" in sql
+        assert "tags" in sql
+
+        # Verify parameter values
+        assert params["service"] == "pricing-api"
+        assert params["method"] == "POST"
+        assert params["path"] == "/quote"
+        assert params["endpoint_key"] == "post_quote"
+        assert params["content_hash"] == "deadbeef" * 8
+        assert params["s3_uri"] == "s3://fixtures-bucket/fixtures/pricing-api/post_quote/2026-03-21/abc123.json"
+        assert params["recorded_at"] == "2026-03-21T14:30:00Z"
+
+    def test_s3_uri_format(self):
+        """s3_uri is formatted as s3://{bucket}/{key}."""
+        from fixture_service.indexer import insert_index_row, FixtureMetadata
+
+        mock_cursor = MagicMock()
+        meta = FixtureMetadata(
+            service="svc", method="GET", path="/health",
+            endpoint_key="get_health", recorded_at="2026-03-21T14:30:00Z",
+            tags={}, fixture_id="id1",
+        )
+
+        insert_index_row(mock_cursor, meta, "fixtures/svc/get_health/2026-03-21/id1.json", "hash", "my-bucket")
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert params["s3_uri"] == "s3://my-bucket/fixtures/svc/get_health/2026-03-21/id1.json"
+
+    def test_tags_passed_as_json(self):
+        """Tags are serialized as a JSON string for the JSONB column."""
+        from fixture_service.indexer import insert_index_row, FixtureMetadata
+
+        mock_cursor = MagicMock()
+        meta = FixtureMetadata(
+            service="svc", method="GET", path="/x",
+            endpoint_key="get_x", recorded_at="2026-03-21T14:30:00Z",
+            tags={"env": "staging", "version": "2.1"}, fixture_id="id1",
+        )
+
+        insert_index_row(mock_cursor, meta, "key", "hash", "bucket")
+
+        params = mock_cursor.execute.call_args[0][1]
+        tags_value = params["tags"]
+        # Should be a JSON string for psycopg2 JSONB compatibility
+        parsed = json.loads(tags_value)
+        assert parsed == {"env": "staging", "version": "2.1"}
