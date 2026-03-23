@@ -581,3 +581,177 @@ class TestIsDailyCapReached:
         result = is_daily_cap_reached(mock_cursor, "svc", "ep", max_per_day=200)
 
         assert result is False
+
+
+class TestProcessMessage:
+    """Tests for process_message — processes a single SQS message end-to-end."""
+
+    def _make_deps(self, fixture_json=None, is_dup=False, is_capped=False):
+        """Helper: build mock dependencies for process_message."""
+        from fixture_service.config import IndexerConfig
+        from fixture_service.metrics import IndexerMetrics
+
+        if fixture_json is None:
+            fixture_json = _make_fixture_json()
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(json.dumps(fixture_json).encode("utf-8")),
+        }
+
+        mock_sqs = MagicMock()
+
+        mock_cursor = MagicMock()
+        # Set up fetchone side_effect for the pipeline's multiple queries
+        if is_dup:
+            # is_duplicate returns a row -> skip
+            mock_cursor.fetchone.side_effect = [(1,)]
+        elif is_capped:
+            # is_duplicate returns None (not dup), is_daily_cap_reached returns (200,) -> capped
+            mock_cursor.fetchone.side_effect = [None, (200,)]
+        else:
+            # is_duplicate returns None (not dup), is_daily_cap_reached returns (0,) -> not capped
+            mock_cursor.fetchone.side_effect = [None, (0,)]
+
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        config = IndexerConfig(
+            sqs_queue_url="https://sqs.example.com/queue",
+            s3_bucket="fixtures-bucket",
+            database_url="postgresql://test",
+            dedup_window_hours=6,
+            max_fixtures_per_endpoint_per_day=200,
+            sqs_max_messages=10,
+            sqs_wait_seconds=20,
+            sqs_visibility_timeout=60,
+            aws_region="us-east-1",
+        )
+
+        metrics = IndexerMetrics()
+
+        return mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics
+
+    def test_happy_path_inserts_row_and_deletes_message(self):
+        """On valid fixture: downloads, parses, dedup-checks, inserts, deletes SQS message."""
+        from fixture_service.indexer import process_message
+
+        fixture_json = _make_fixture_json()
+        s3_key = "fixtures/pricing-api/post_quote/2026-03-21/abc123.json"
+        sqs_msg = _make_sqs_message(s3_key)
+
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps(
+            fixture_json=fixture_json, is_dup=False,
+        )
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # S3 download happened
+        mock_s3.get_object.assert_called_once_with(Bucket="fixtures-bucket", Key=s3_key)
+        # Insert happened (is_duplicate returned None = not a dup)
+        assert mock_cursor.execute.call_count >= 2  # dedup check + insert (possibly cap check)
+        # SQS message deleted
+        mock_sqs.delete_message.assert_called_once_with(
+            QueueUrl=config.sqs_queue_url,
+            ReceiptHandle=sqs_msg["ReceiptHandle"],
+        )
+        # Metrics
+        assert metrics.messages_processed == 1
+        assert metrics.rows_inserted == 1
+
+    def test_duplicate_skips_insert_but_deletes_message(self):
+        """On duplicate: skips insert, but still deletes SQS message (idempotent)."""
+        from fixture_service.indexer import process_message
+
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps(is_dup=True)
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # SQS message still deleted (dedup is not an error)
+        mock_sqs.delete_message.assert_called_once()
+        # Metrics
+        assert metrics.messages_processed == 1
+        assert metrics.duplicates_skipped == 1
+        assert metrics.rows_inserted == 0
+
+    def test_malformed_json_logs_and_deletes_message(self):
+        """On malformed JSON: logs error, deletes message (don't retry garbage)."""
+        from fixture_service.indexer import process_message
+
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps()
+
+        # Override S3 to return invalid JSON
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(b"NOT VALID JSON"),
+        }
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Message deleted (garbage should not be retried)
+        mock_sqs.delete_message.assert_called_once()
+        # Metrics
+        assert metrics.parse_errors == 1
+        assert metrics.rows_inserted == 0
+
+    def test_s3_error_does_not_delete_message(self):
+        """On S3 failure: does NOT delete SQS message (let SQS retry)."""
+        from fixture_service.indexer import process_message
+        from botocore.exceptions import ClientError
+
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps()
+
+        mock_s3.get_object.side_effect = ClientError(
+            {"Error": {"Code": "500", "Message": "Internal"}}, "GetObject"
+        )
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Message NOT deleted — SQS will retry after visibility timeout
+        mock_sqs.delete_message.assert_not_called()
+
+    def test_postgres_error_does_not_delete_message(self):
+        """On Postgres failure: does NOT delete SQS message (let SQS retry)."""
+        from fixture_service.indexer import process_message
+        import psycopg2
+
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps()
+
+        # First cursor.execute call (is_duplicate) raises
+        mock_cursor.execute.side_effect = psycopg2.OperationalError("connection refused")
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Message NOT deleted — SQS will retry
+        mock_sqs.delete_message.assert_not_called()
+
+    def test_malformed_sqs_body_deletes_message(self):
+        """On unparseable SQS body: deletes message (garbage, don't retry)."""
+        from fixture_service.indexer import process_message
+
+        sqs_msg = {"MessageId": "bad", "ReceiptHandle": "r", "Body": "not-json"}
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps()
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Message deleted — malformed event is garbage
+        mock_sqs.delete_message.assert_called_once()
+        assert metrics.parse_errors == 1
+
+    def test_daily_cap_reached_skips_insert_and_deletes_message(self):
+        """On daily cap reached: skips insert, deletes message."""
+        from fixture_service.indexer import process_message
+
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+        mock_s3, mock_sqs, mock_conn, mock_cursor, config, metrics = self._make_deps(is_capped=True)
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Message deleted (cap reached is not an error, just a skip)
+        mock_sqs.delete_message.assert_called_once()
+        assert metrics.daily_cap_skipped == 1
+        assert metrics.rows_inserted == 0

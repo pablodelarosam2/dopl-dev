@@ -24,6 +24,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict
 
+import psycopg2
+from botocore.exceptions import ClientError
+
+from fixture_service.config import IndexerConfig
+from fixture_service.metrics import IndexerMetrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -380,3 +386,153 @@ def is_daily_cap_reached(
     )
     count = cursor.fetchone()[0]
     return count >= max_per_day
+
+
+# ---------------------------------------------------------------------------
+# Single Message Processing
+# ---------------------------------------------------------------------------
+
+def process_message(
+    sqs_message: Dict[str, Any],
+    s3_client: Any,
+    sqs_client: Any,
+    db_conn: Any,
+    config: IndexerConfig,
+    metrics: IndexerMetrics,
+) -> None:
+    """Process a single SQS message through the full indexing pipeline.
+
+    Pipeline steps:
+      1. Parse S3 event from SQS message body.
+      2. Download fixture JSON from S3.
+      3. Parse S3 key for metadata (service, endpoint_key, date).
+      4. Extract metadata from fixture body + S3 key.
+      5. Compute content hash.
+      6. Dedup check (skip if duplicate within window).
+      7. Daily cap check (skip if cap reached).
+      8. Insert index row.
+      9. Delete SQS message on success.
+
+    Error handling:
+      - Malformed JSON (SQS body or fixture): log, delete message, increment parse_errors.
+      - S3/Postgres transient errors: do NOT delete message, let SQS retry.
+
+    Args:
+        sqs_message: Raw SQS message dict.
+        s3_client: boto3 S3 client.
+        sqs_client: boto3 SQS client.
+        db_conn: psycopg2 connection.
+        config: Indexer configuration.
+        metrics: Metrics counters.
+    """
+    receipt_handle = sqs_message.get("ReceiptHandle", "")
+    message_id = sqs_message.get("MessageId", "")
+
+    # --- Step 1: Parse S3 event from SQS ---
+    try:
+        event_info = parse_s3_event(sqs_message)
+    except ValueError:
+        logger.error("Malformed SQS message body, discarding", extra={"message_id": message_id})
+        metrics.inc_parse_errors()
+        _delete_message(sqs_client, config.sqs_queue_url, receipt_handle)
+        return
+
+    s3_key = event_info.s3_key
+
+    # --- Step 2: Download fixture from S3 ---
+    try:
+        fixture = download_and_parse(s3_client, config.s3_bucket, s3_key)
+    except ValueError:
+        logger.error("Malformed fixture JSON, discarding", extra={"s3_key": s3_key})
+        metrics.inc_parse_errors()
+        _delete_message(sqs_client, config.sqs_queue_url, receipt_handle)
+        return
+    except ClientError as exc:
+        logger.warning(
+            "S3 download failed, leaving message for retry",
+            extra={"s3_key": s3_key, "error": str(exc)},
+        )
+        return  # Do NOT delete — SQS will retry
+
+    # --- Step 3: Parse S3 key ---
+    try:
+        key_meta = parse_s3_key(s3_key)
+    except ValueError:
+        logger.error("Invalid S3 key format, discarding", extra={"s3_key": s3_key})
+        metrics.inc_parse_errors()
+        _delete_message(sqs_client, config.sqs_queue_url, receipt_handle)
+        return
+
+    # --- Step 4: Extract metadata ---
+    metadata = extract_metadata(fixture, key_meta, event_time=event_info.event_time)
+
+    # --- Step 5: Compute content hash ---
+    content_hash = compute_content_hash(fixture)
+
+    # --- Steps 6-8: Dedup, cap check, insert (all need Postgres) ---
+    try:
+        with db_conn.cursor() as cursor:
+            # Dedup check
+            if is_duplicate(cursor, content_hash, config.dedup_window_hours):
+                logger.info("Duplicate fixture, skipping", extra={"content_hash": content_hash[:16]})
+                metrics.inc_messages_processed()
+                metrics.inc_duplicates_skipped()
+                _delete_message(sqs_client, config.sqs_queue_url, receipt_handle)
+                return
+
+            # Daily cap check
+            if is_daily_cap_reached(
+                cursor,
+                metadata.service,
+                metadata.endpoint_key,
+                config.max_fixtures_per_endpoint_per_day,
+            ):
+                logger.info(
+                    "Daily cap reached, skipping",
+                    extra={
+                        "service": metadata.service,
+                        "endpoint_key": metadata.endpoint_key,
+                    },
+                )
+                metrics.inc_messages_processed()
+                metrics.inc_daily_cap_skipped()
+                _delete_message(sqs_client, config.sqs_queue_url, receipt_handle)
+                return
+
+            # Insert
+            insert_index_row(cursor, metadata, s3_key, content_hash, config.s3_bucket)
+            db_conn.commit()
+
+    except psycopg2.Error as exc:
+        logger.warning(
+            "Postgres error, leaving message for retry",
+            extra={"error": str(exc), "s3_key": s3_key},
+        )
+        try:
+            db_conn.rollback()
+        except Exception:
+            pass
+        return  # Do NOT delete — SQS will retry
+
+    metrics.inc_messages_processed()
+    metrics.inc_rows_inserted()
+    _delete_message(sqs_client, config.sqs_queue_url, receipt_handle)
+    logger.info(
+        "Fixture indexed",
+        extra={
+            "fixture_id": metadata.fixture_id,
+            "service": metadata.service,
+            "endpoint_key": metadata.endpoint_key,
+        },
+    )
+
+
+def _delete_message(sqs_client: Any, queue_url: str, receipt_handle: str) -> None:
+    """Delete an SQS message by receipt handle.
+
+    Best-effort: logs but does not raise on failure.
+    """
+    try:
+        sqs_client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+    except Exception as exc:
+        logger.error("Failed to delete SQS message", extra={"error": str(exc)})
