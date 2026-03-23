@@ -1,7 +1,10 @@
 """Tests for fixture_service.indexer."""
 
+import io
 import json
 import pytest
+import psycopg2
+from unittest.mock import MagicMock, patch
 
 
 def _make_sqs_message(s3_key, bucket="fixtures-bucket", event_time="2026-03-21T14:30:00.000Z"):
@@ -169,9 +172,6 @@ class TestBuildEndpointKey:
 
         assert build_endpoint_key("PUT", "/items/") == "put_items"
 
-
-from unittest.mock import MagicMock, patch
-import io
 
 
 def _make_fixture_json(
@@ -912,3 +912,160 @@ class TestMain:
         mock_psycopg2.connect.assert_called_once_with(mock_config.database_url)
         # run_indexer called
         mock_run.assert_called_once()
+
+
+class TestEndToEndPipeline:
+    """Integration-level tests verifying exit criteria from the spec."""
+
+    def _make_config(self):
+        from fixture_service.config import IndexerConfig
+        return IndexerConfig(
+            sqs_queue_url="https://sqs.example.com/queue",
+            s3_bucket="fixtures-bucket",
+            database_url="postgresql://test",
+            dedup_window_hours=6,
+            max_fixtures_per_endpoint_per_day=200,
+            sqs_max_messages=10,
+            sqs_wait_seconds=20,
+            sqs_visibility_timeout=60,
+            aws_region="us-east-1",
+        )
+
+    def test_10_fixtures_produce_10_rows(self):
+        """Upload 10 unique fixtures, confirm 10 rows inserted."""
+        from fixture_service.indexer import process_message
+        from fixture_service.metrics import IndexerMetrics
+
+        config = self._make_config()
+        metrics = IndexerMetrics()
+
+        for i in range(10):
+            fixture = _make_fixture_json(
+                fixture_id=f"fix-{i}",
+                recorded_at=f"2026-03-21T14:{i:02d}:00Z",
+            )
+            # Each fixture has different content (different recorded_at + fixture_id)
+            fixture["output"] = {"price": i * 10.0}
+            s3_key = f"fixtures/pricing-api/post_quote/2026-03-21/fix-{i}.json"
+            sqs_msg = _make_sqs_message(s3_key)
+
+            mock_s3 = MagicMock()
+            mock_s3.get_object.return_value = {
+                "Body": io.BytesIO(json.dumps(fixture).encode("utf-8")),
+            }
+
+            mock_sqs = MagicMock()
+
+            mock_cursor = MagicMock()
+            # Not a dup, not capped
+            mock_cursor.fetchone.side_effect = [None, (i,)]
+
+            mock_conn = MagicMock()
+            mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+            mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+            process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        assert metrics.rows_inserted == 10
+        assert metrics.messages_processed == 10
+        assert metrics.duplicates_skipped == 0
+        assert metrics.parse_errors == 0
+
+    def test_duplicate_fixture_within_window_produces_1_row(self):
+        """Same fixture twice within 6h dedup window = 1 row inserted."""
+        from fixture_service.indexer import process_message
+        from fixture_service.metrics import IndexerMetrics
+
+        config = self._make_config()
+        metrics = IndexerMetrics()
+
+        fixture = _make_fixture_json()
+        s3_key = "fixtures/svc/post_x/2026-03-21/id1.json"
+
+        # First call: not a dup, not capped
+        sqs_msg1 = _make_sqs_message(s3_key)
+        mock_s3_1 = MagicMock()
+        mock_s3_1.get_object.return_value = {
+            "Body": io.BytesIO(json.dumps(fixture).encode("utf-8")),
+        }
+        mock_sqs_1 = MagicMock()
+        mock_cursor_1 = MagicMock()
+        mock_cursor_1.fetchone.side_effect = [None, (0,)]
+        mock_conn_1 = MagicMock()
+        mock_conn_1.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor_1)
+        mock_conn_1.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        process_message(sqs_msg1, mock_s3_1, mock_sqs_1, mock_conn_1, config, metrics)
+
+        # Second call: same fixture, is a dup
+        sqs_msg2 = _make_sqs_message(s3_key)
+        mock_s3_2 = MagicMock()
+        mock_s3_2.get_object.return_value = {
+            "Body": io.BytesIO(json.dumps(fixture).encode("utf-8")),
+        }
+        mock_sqs_2 = MagicMock()
+        mock_cursor_2 = MagicMock()
+        mock_cursor_2.fetchone.side_effect = [(1,)]  # is_duplicate returns True
+        mock_conn_2 = MagicMock()
+        mock_conn_2.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor_2)
+        mock_conn_2.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        process_message(sqs_msg2, mock_s3_2, mock_sqs_2, mock_conn_2, config, metrics)
+
+        assert metrics.rows_inserted == 1
+        assert metrics.duplicates_skipped == 1
+        # Both messages were deleted (dup is not an error)
+        mock_sqs_1.delete_message.assert_called_once()
+        mock_sqs_2.delete_message.assert_called_once()
+
+    def test_malformed_fixture_discarded_not_retried(self):
+        """Malformed JSON is logged, message deleted, no retry."""
+        from fixture_service.indexer import process_message
+        from fixture_service.metrics import IndexerMetrics
+
+        config = self._make_config()
+        metrics = IndexerMetrics()
+
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(b"TOTALLY NOT JSON {{{"),
+        }
+        mock_sqs = MagicMock()
+        mock_conn = MagicMock()
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        assert metrics.parse_errors == 1
+        assert metrics.rows_inserted == 0
+        # Message deleted — garbage is not retried
+        mock_sqs.delete_message.assert_called_once()
+
+    def test_postgres_outage_leaves_message_in_sqs(self):
+        """Postgres failure: message NOT deleted, SQS will retry."""
+        from fixture_service.indexer import process_message
+        from fixture_service.metrics import IndexerMetrics
+
+        config = self._make_config()
+        metrics = IndexerMetrics()
+
+        fixture = _make_fixture_json()
+        sqs_msg = _make_sqs_message("fixtures/svc/post_x/2026-03-21/id1.json")
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(json.dumps(fixture).encode("utf-8")),
+        }
+        mock_sqs = MagicMock()
+
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = psycopg2.OperationalError("connection refused")
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        process_message(sqs_msg, mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Message NOT deleted
+        mock_sqs.delete_message.assert_not_called()
+        assert metrics.rows_inserted == 0
