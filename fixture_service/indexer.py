@@ -266,3 +266,36 @@ def extract_metadata(
         tags=tags,
         fixture_id=key_meta.fixture_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
+
+def is_duplicate(cursor: Any, content_hash: str, window_hours: int) -> bool:
+    """Check if a fixture with this content_hash was already indexed within the dedup window.
+
+    Executes::
+
+        SELECT 1 FROM fixtures_index
+        WHERE content_hash = %s
+          AND recorded_at > now() - interval '%s hours'
+
+    Args:
+        cursor: A psycopg2 cursor (or mock).
+        content_hash: SHA-256 hex digest of the canonical fixture.
+        window_hours: Number of hours for the dedup window.
+
+    Returns:
+        True if a duplicate exists within the window, False otherwise.
+    """
+    cursor.execute(
+        """
+        SELECT 1 FROM fixtures_index
+        WHERE content_hash = %s
+          AND recorded_at > now() - make_interval(hours => %s)
+        LIMIT 1
+        """,
+        (content_hash, window_hours),
+    )
+    return cursor.fetchone() is not None

@@ -377,3 +377,60 @@ class TestExtractMetadata:
 
         meta = extract_metadata(fixture, key_meta, event_time="2026-03-21T15:00:00Z")
         assert meta.recorded_at == "2026-03-21T15:00:00Z"
+
+
+class TestIsDuplicate:
+    """Tests for is_duplicate — queries Postgres for existing content_hash within dedup window."""
+
+    def test_returns_false_when_no_match(self):
+        """Not a duplicate when no rows match the content_hash within the window."""
+        from fixture_service.indexer import is_duplicate
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+
+        result = is_duplicate(mock_cursor, "abc123hash", window_hours=6)
+
+        assert result is False
+        mock_cursor.execute.assert_called_once()
+        # Verify the SQL query checks content_hash within time window
+        sql = mock_cursor.execute.call_args[0][0]
+        assert "content_hash" in sql
+        assert "recorded_at" in sql
+        assert "interval" in sql
+
+    def test_returns_true_when_match_exists(self):
+        """Is a duplicate when a row with the same content_hash exists within the window."""
+        from fixture_service.indexer import is_duplicate
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (1,)
+
+        result = is_duplicate(mock_cursor, "abc123hash", window_hours=6)
+
+        assert result is True
+
+    def test_passes_correct_parameters(self):
+        """Passes content_hash and window_hours to the SQL query."""
+        from fixture_service.indexer import is_duplicate
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+
+        is_duplicate(mock_cursor, "myhash", window_hours=12)
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert params[0] == "myhash"
+        assert params[1] == 12
+
+    def test_uses_configurable_window(self):
+        """The dedup window is configurable (not hardcoded to 6 hours)."""
+        from fixture_service.indexer import is_duplicate
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+
+        is_duplicate(mock_cursor, "hash", window_hours=24)
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert params[1] == 24
