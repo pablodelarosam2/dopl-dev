@@ -162,3 +162,31 @@ def build_endpoint_key(method: str, path: str) -> str:
     while "__" in raw:
         raw = raw.replace("__", "_")
     return raw
+
+
+# ---------------------------------------------------------------------------
+# S3 Download and Parse
+# ---------------------------------------------------------------------------
+
+def download_and_parse(s3_client: Any, bucket: str, s3_key: str) -> Dict[str, Any]:
+    """Download a fixture JSON file from S3 and parse it.
+
+    Args:
+        s3_client: A boto3 S3 client (or mock).
+        bucket: S3 bucket name.
+        s3_key: Full S3 object key.
+
+    Returns:
+        Parsed fixture as a dict.
+
+    Raises:
+        ValueError: If the S3 object body is not valid JSON.
+        botocore.exceptions.ClientError: Propagated on S3 errors (e.g., NoSuchKey).
+    """
+    response = s3_client.get_object(Bucket=bucket, Key=s3_key)
+    body_bytes = response["Body"].read()
+
+    try:
+        return json.loads(body_bytes)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"Malformed fixture JSON from s3://{bucket}/{s3_key}: {exc}") from exc

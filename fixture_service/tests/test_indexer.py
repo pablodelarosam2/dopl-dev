@@ -168,3 +168,91 @@ class TestBuildEndpointKey:
         from fixture_service.indexer import build_endpoint_key
 
         assert build_endpoint_key("PUT", "/items/") == "put_items"
+
+
+from unittest.mock import MagicMock, patch
+import io
+
+
+def _make_fixture_json(
+    fixture_id="abc123",
+    method="POST",
+    path="/quote",
+    recorded_at="2026-03-21T14:30:00Z",
+    tags=None,
+):
+    """Helper: build a minimal fixture JSON dict."""
+    return {
+        "fixture_id": fixture_id,
+        "qualname": "app.routes.create_quote",
+        "run_id": "run-001",
+        "recorded_at": recorded_at,
+        "input": {"body": {"item": "widget", "qty": 10}},
+        "input_fingerprint": "aaa",
+        "output": {"price": 99.99},
+        "output_fingerprint": "bbb",
+        "stubs": [
+            {"type": "http", "service": "tax-svc", "response": {"rate": 0.08}}
+        ],
+        "duration_ms": 42.5,
+        "error": None,
+        "ordinal": 0,
+        "method": method,
+        "path": path,
+        "tags": tags or {},
+    }
+
+
+class TestDownloadAndParse:
+    """Tests for download_and_parse — fetches fixture JSON from S3 via boto3."""
+
+    def test_downloads_and_returns_dict(self):
+        """Returns parsed dict when S3 returns valid JSON."""
+        from fixture_service.indexer import download_and_parse
+
+        fixture_data = _make_fixture_json()
+        body_bytes = json.dumps(fixture_data).encode("utf-8")
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(body_bytes),
+        }
+
+        result = download_and_parse(
+            mock_s3,
+            bucket="fixtures-bucket",
+            s3_key="fixtures/pricing-api/post_quote/2026-03-21/abc123.json",
+        )
+
+        assert result["fixture_id"] == "abc123"
+        assert result["output"] == {"price": 99.99}
+        mock_s3.get_object.assert_called_once_with(
+            Bucket="fixtures-bucket",
+            Key="fixtures/pricing-api/post_quote/2026-03-21/abc123.json",
+        )
+
+    def test_raises_on_invalid_json(self):
+        """Raises ValueError when S3 object is not valid JSON."""
+        from fixture_service.indexer import download_and_parse
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(b"not-json{{{"),
+        }
+
+        with pytest.raises(ValueError, match="Malformed fixture JSON"):
+            download_and_parse(mock_s3, "bucket", "key.json")
+
+    def test_propagates_s3_client_error(self):
+        """Does not catch boto3 ClientError — lets caller handle retry logic."""
+        from fixture_service.indexer import download_and_parse
+        from botocore.exceptions import ClientError
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": "Not found"}},
+            "GetObject",
+        )
+
+        with pytest.raises(ClientError):
+            download_and_parse(mock_s3, "bucket", "key.json")
