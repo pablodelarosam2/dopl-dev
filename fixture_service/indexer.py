@@ -536,3 +536,54 @@ def _delete_message(sqs_client: Any, queue_url: str, receipt_handle: str) -> Non
         sqs_client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
     except Exception as exc:
         logger.error("Failed to delete SQS message", extra={"error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Main Loop
+# ---------------------------------------------------------------------------
+
+def run_indexer(
+    s3_client: Any,
+    sqs_client: Any,
+    db_conn: Any,
+    config: IndexerConfig,
+    metrics: IndexerMetrics,
+) -> None:
+    """Main SQS polling loop for the Indexer service.
+
+    Runs indefinitely, polling SQS for S3 event notifications and processing
+    each message through the indexing pipeline. Exits only on KeyboardInterrupt
+    or an unrecoverable error.
+
+    Args:
+        s3_client: boto3 S3 client.
+        sqs_client: boto3 SQS client.
+        db_conn: psycopg2 connection.
+        config: Indexer configuration.
+        metrics: Metrics counters.
+    """
+    logger.info(
+        "Indexer starting",
+        extra={
+            "queue_url": config.sqs_queue_url,
+            "bucket": config.s3_bucket,
+            "dedup_window_hours": config.dedup_window_hours,
+        },
+    )
+
+    while True:
+        response = sqs_client.receive_message(
+            QueueUrl=config.sqs_queue_url,
+            MaxNumberOfMessages=config.sqs_max_messages,
+            WaitTimeSeconds=config.sqs_wait_seconds,
+        )
+
+        messages = response.get("Messages", [])
+        if not messages:
+            continue
+
+        for msg in messages:
+            process_message(msg, s3_client, sqs_client, db_conn, config, metrics)
+
+        # Log metrics snapshot after each batch
+        logger.info("Batch complete", extra={"metrics": metrics.snapshot()})

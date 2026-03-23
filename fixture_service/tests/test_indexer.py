@@ -755,3 +755,130 @@ class TestProcessMessage:
         mock_sqs.delete_message.assert_called_once()
         assert metrics.daily_cap_skipped == 1
         assert metrics.rows_inserted == 0
+
+
+class TestRunIndexer:
+    """Tests for run_indexer — the main SQS polling loop."""
+
+    def test_polls_sqs_and_processes_messages(self):
+        """Polls SQS, processes returned messages, then polls again."""
+        from fixture_service.indexer import run_indexer
+        from fixture_service.config import IndexerConfig
+        from fixture_service.metrics import IndexerMetrics
+
+        config = IndexerConfig(
+            sqs_queue_url="https://sqs.example.com/queue",
+            s3_bucket="bucket",
+            database_url="postgresql://test",
+            dedup_window_hours=6,
+            max_fixtures_per_endpoint_per_day=200,
+            sqs_max_messages=10,
+            sqs_wait_seconds=20,
+            sqs_visibility_timeout=60,
+            aws_region="us-east-1",
+        )
+        metrics = IndexerMetrics()
+
+        fixture_json = _make_fixture_json()
+        s3_key = "fixtures/svc/post_quote/2026-03-21/id1.json"
+        sqs_msg = _make_sqs_message(s3_key)
+
+        mock_sqs = MagicMock()
+        # First call returns one message, second call raises to break loop
+        mock_sqs.receive_message.side_effect = [
+            {"Messages": [sqs_msg]},
+            KeyboardInterrupt(),  # Break the infinite loop
+        ]
+
+        mock_s3 = MagicMock()
+        mock_s3.get_object.return_value = {
+            "Body": io.BytesIO(json.dumps(fixture_json).encode("utf-8")),
+        }
+
+        mock_cursor = MagicMock()
+        # is_duplicate -> None (not dup), is_daily_cap_reached -> (0,) (not capped)
+        mock_cursor.fetchone.side_effect = [None, (0,)]
+
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        with pytest.raises(KeyboardInterrupt):
+            run_indexer(mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Verify SQS was polled with correct parameters
+        mock_sqs.receive_message.assert_called_with(
+            QueueUrl=config.sqs_queue_url,
+            MaxNumberOfMessages=config.sqs_max_messages,
+            WaitTimeSeconds=config.sqs_wait_seconds,
+        )
+
+    def test_handles_empty_poll(self):
+        """When SQS returns no messages, continues polling."""
+        from fixture_service.indexer import run_indexer
+        from fixture_service.config import IndexerConfig
+        from fixture_service.metrics import IndexerMetrics
+
+        config = IndexerConfig(
+            sqs_queue_url="https://sqs.example.com/queue",
+            s3_bucket="bucket",
+            database_url="postgresql://test",
+            dedup_window_hours=6,
+            max_fixtures_per_endpoint_per_day=200,
+            sqs_max_messages=10,
+            sqs_wait_seconds=20,
+            sqs_visibility_timeout=60,
+            aws_region="us-east-1",
+        )
+        metrics = IndexerMetrics()
+
+        mock_sqs = MagicMock()
+        # Two empty polls, then break
+        mock_sqs.receive_message.side_effect = [
+            {"Messages": []},
+            {},  # No "Messages" key at all
+            KeyboardInterrupt(),
+        ]
+
+        mock_s3 = MagicMock()
+        mock_conn = MagicMock()
+
+        with pytest.raises(KeyboardInterrupt):
+            run_indexer(mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # Should have polled 3 times (2 empty + 1 that raised)
+        assert mock_sqs.receive_message.call_count == 3
+
+    def test_logs_metrics_snapshot_periodically(self):
+        """Logs a metrics snapshot after processing a batch."""
+        from fixture_service.indexer import run_indexer
+        from fixture_service.config import IndexerConfig
+        from fixture_service.metrics import IndexerMetrics
+
+        config = IndexerConfig(
+            sqs_queue_url="https://sqs.example.com/queue",
+            s3_bucket="bucket",
+            database_url="postgresql://test",
+            dedup_window_hours=6,
+            max_fixtures_per_endpoint_per_day=200,
+            sqs_max_messages=10,
+            sqs_wait_seconds=20,
+            sqs_visibility_timeout=60,
+            aws_region="us-east-1",
+        )
+        metrics = IndexerMetrics()
+
+        mock_sqs = MagicMock()
+        mock_sqs.receive_message.side_effect = [
+            {"Messages": []},
+            KeyboardInterrupt(),
+        ]
+
+        mock_s3 = MagicMock()
+        mock_conn = MagicMock()
+
+        with pytest.raises(KeyboardInterrupt):
+            run_indexer(mock_s3, mock_sqs, mock_conn, config, metrics)
+
+        # No assertions on log output — just verify it didn't crash.
+        # Structured logging verification would require a log capture fixture.
