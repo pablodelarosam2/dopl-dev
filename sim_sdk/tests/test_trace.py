@@ -793,8 +793,26 @@ class TestEventMetadataFromContext:
         assert event.method == "POST"
         assert event.path == "/quote"
 
+    def test_service_from_context(self):
+        """FixtureEvent picks up service from SimContext."""
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        ctx.http_method = "POST"
+        ctx.http_path = "/quote"
+        ctx.service = "pricing-api"
+
+        add(2, 3)
+
+        event = sink.events[0]
+        assert event.method == "POST"
+        assert event.path == "/quote"
+        assert event.service == "pricing-api"
+
     def test_defaults_when_not_set(self):
-        """method/path default to empty when context has no HTTP metadata."""
+        """method/path/service default to empty when context has no metadata."""
         @sim_trace
         def add(a, b):
             return a + b
@@ -805,3 +823,4 @@ class TestEventMetadataFromContext:
         event = sink.events[0]
         assert event.method == ""
         assert event.path == ""
+        assert event.service == ""

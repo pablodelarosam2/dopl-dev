@@ -166,6 +166,7 @@ def _emit_record(
         event_type="Output",
         method=ctx.http_method,
         path=ctx.http_path,
+        service=ctx.service,
     )
 
     if ctx.sink is not None:

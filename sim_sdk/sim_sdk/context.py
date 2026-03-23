@@ -54,6 +54,7 @@ class SimContext:
     trace_depth: int = 0
     http_method: str = ""
     http_path: str = ""
+    service: str = ""
 
     def next_ordinal(self, fingerprint: str) -> int:
         """Get the next ordinal for a fingerprint and increment the counter."""
@@ -81,6 +82,7 @@ class SimContext:
         self.trace_depth = 0
         self.http_method = ""
         self.http_path = ""
+        self.service = ""
 
     @property
     def is_active(self) -> bool:
