@@ -288,12 +288,12 @@ class TestComputeContentHash:
         assert compute_content_hash(f1) == compute_content_hash(f2)
 
     def test_different_content_different_hash(self):
-        """Different fixture content produces a different hash."""
+        """Different fixture content (input/stubs/method/path) produces a different hash."""
         from fixture_service.indexer import compute_content_hash
 
         f1 = _make_fixture_json()
         f2 = _make_fixture_json()
-        f2["output"] = {"price": 0.01}  # different output
+        f2["input"] = {"body": {"item": "gadget", "qty": 5}}  # different input
         assert compute_content_hash(f1) != compute_content_hash(f2)
 
     def test_hashes_input_and_stubs(self):
@@ -303,6 +303,44 @@ class TestComputeContentHash:
         f1 = _make_fixture_json()
         f2 = _make_fixture_json()
         f2["stubs"] = []  # remove stubs
+        assert compute_content_hash(f1) != compute_content_hash(f2)
+
+    def test_same_request_different_metadata_same_hash(self):
+        """Two fixtures with identical input+stubs+method+path but different
+        metadata (recorded_at, fixture_id, duration_ms, run_id) produce the
+        same hash — metadata must not affect dedup identity."""
+        from fixture_service.indexer import compute_content_hash
+
+        f1 = _make_fixture_json(
+            fixture_id="id-aaa",
+            recorded_at="2026-03-21T10:00:00Z",
+        )
+        f1["duration_ms"] = 42.5
+        f1["run_id"] = "run-001"
+
+        f2 = _make_fixture_json(
+            fixture_id="id-bbb",
+            recorded_at="2026-03-22T18:00:00Z",
+        )
+        f2["duration_ms"] = 99.9
+        f2["run_id"] = "run-002"
+
+        assert compute_content_hash(f1) == compute_content_hash(f2)
+
+    def test_different_method_different_hash(self):
+        """Different HTTP method produces a different hash."""
+        from fixture_service.indexer import compute_content_hash
+
+        f1 = _make_fixture_json(method="POST", path="/quote")
+        f2 = _make_fixture_json(method="GET", path="/quote")
+        assert compute_content_hash(f1) != compute_content_hash(f2)
+
+    def test_different_path_different_hash(self):
+        """Different HTTP path produces a different hash."""
+        from fixture_service.indexer import compute_content_hash
+
+        f1 = _make_fixture_json(method="POST", path="/quote")
+        f2 = _make_fixture_json(method="POST", path="/checkout")
         assert compute_content_hash(f1) != compute_content_hash(f2)
 
 
@@ -377,6 +415,24 @@ class TestExtractMetadata:
 
         meta = extract_metadata(fixture, key_meta, event_time="2026-03-21T15:00:00Z")
         assert meta.recorded_at == "2026-03-21T15:00:00Z"
+
+    def test_falls_back_to_utc_now_when_no_timestamp(self):
+        """If both fixture JSON and S3 event have no timestamp, falls back to current UTC time."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+        from datetime import datetime, timezone
+
+        fixture = _make_fixture_json()
+        del fixture["recorded_at"]
+        key_meta = S3KeyMetadata(service="svc", endpoint_key="post_quote", date="2026-03-21", fixture_id="abc123")
+
+        before = datetime.now(timezone.utc)
+        meta = extract_metadata(fixture, key_meta, event_time="")
+        after = datetime.now(timezone.utc)
+
+        # recorded_at should be a valid ISO 8601 timestamp between before and after
+        parsed = datetime.fromisoformat(meta.recorded_at)
+        assert parsed.tzinfo is not None, "recorded_at must be timezone-aware"
+        assert before <= parsed <= after
 
 
 class TestIsDuplicate:
@@ -502,9 +558,10 @@ class TestInsertIndexRow:
         params = mock_cursor.execute.call_args[0][1]
         assert params["s3_uri"] == "s3://my-bucket/fixtures/svc/get_health/2026-03-21/id1.json"
 
-    def test_tags_passed_as_json(self):
-        """Tags are serialized as a JSON string for the JSONB column."""
+    def test_tags_passed_as_psycopg2_json(self):
+        """Tags are wrapped with psycopg2.extras.Json for proper JSONB handling."""
         from fixture_service.indexer import insert_index_row, FixtureMetadata
+        import psycopg2.extras
 
         mock_cursor = MagicMock()
         meta = FixtureMetadata(
@@ -517,9 +574,9 @@ class TestInsertIndexRow:
 
         params = mock_cursor.execute.call_args[0][1]
         tags_value = params["tags"]
-        # Should be a JSON string for psycopg2 JSONB compatibility
-        parsed = json.loads(tags_value)
-        assert parsed == {"env": "staging", "version": "2.1"}
+        # Should be a psycopg2.extras.Json instance for proper JSONB handling
+        assert isinstance(tags_value, psycopg2.extras.Json)
+        assert tags_value.adapted == {"env": "staging", "version": "2.1"}
 
 
 class TestIsDailyCapReached:
@@ -887,11 +944,11 @@ class TestRunIndexer:
 class TestMain:
     """Tests for the indexer __main__ entrypoint."""
 
-    @patch("fixture_service.__main__.psycopg2")
+    @patch("fixture_service.__main__._ensure_connection")
     @patch("fixture_service.__main__.boto3")
     @patch("fixture_service.__main__.IndexerConfig")
     @patch("fixture_service.__main__.run_indexer")
-    def test_main_wires_dependencies(self, mock_run, mock_config_cls, mock_boto3, mock_psycopg2):
+    def test_main_wires_dependencies(self, mock_run, mock_config_cls, mock_boto3, mock_ensure_conn):
         """main() creates clients, config, and calls run_indexer."""
         from fixture_service.__main__ import main
 
@@ -900,6 +957,8 @@ class TestMain:
         mock_config.database_url = "postgresql://test"
         mock_config_cls.from_env.return_value = mock_config
 
+        mock_conn = MagicMock()
+        mock_ensure_conn.return_value = mock_conn
         mock_run.side_effect = KeyboardInterrupt()
 
         main()
@@ -908,10 +967,82 @@ class TestMain:
         mock_config_cls.from_env.assert_called_once()
         # boto3 clients created
         assert mock_boto3.client.call_count == 2  # s3 + sqs
-        # Postgres connection opened
-        mock_psycopg2.connect.assert_called_once_with(mock_config.database_url)
+        # Postgres connection created via _ensure_connection
+        mock_ensure_conn.assert_called_once_with(mock_config.database_url)
         # run_indexer called
         mock_run.assert_called_once()
+
+    @patch("fixture_service.__main__.time.sleep")
+    @patch("fixture_service.__main__._ensure_connection")
+    @patch("fixture_service.__main__.boto3")
+    @patch("fixture_service.__main__.IndexerConfig")
+    @patch("fixture_service.__main__.run_indexer")
+    def test_reconnects_on_operational_error(
+        self, mock_run, mock_config_cls, mock_boto3, mock_ensure_conn, mock_sleep
+    ):
+        """main() reconnects to Postgres when run_indexer raises OperationalError."""
+        from fixture_service.__main__ import main
+        import psycopg2
+
+        mock_config = MagicMock()
+        mock_config.aws_region = "us-east-1"
+        mock_config.database_url = "postgresql://test"
+        mock_config_cls.from_env.return_value = mock_config
+
+        mock_conn1 = MagicMock()
+        mock_conn2 = MagicMock()
+        mock_ensure_conn.side_effect = [mock_conn1, mock_conn2]
+
+        # First call: OperationalError (connection lost). Second call: KeyboardInterrupt (exit).
+        mock_run.side_effect = [
+            psycopg2.OperationalError("connection reset by peer"),
+            KeyboardInterrupt(),
+        ]
+
+        main()
+
+        # _ensure_connection called twice: initial + reconnect
+        assert mock_ensure_conn.call_count == 2
+        # run_indexer called twice: once with each connection
+        assert mock_run.call_count == 2
+        # First connection was closed after failure
+        mock_conn1.close.assert_called_once()
+        # Backoff sleep was called
+        mock_sleep.assert_called()
+
+    @patch("fixture_service.__main__.time.sleep")
+    @patch("fixture_service.__main__._ensure_connection")
+    @patch("fixture_service.__main__.boto3")
+    @patch("fixture_service.__main__.IndexerConfig")
+    @patch("fixture_service.__main__.run_indexer")
+    def test_retries_initial_connection_failure(
+        self, mock_run, mock_config_cls, mock_boto3, mock_ensure_conn, mock_sleep
+    ):
+        """main() retries when the initial Postgres connection fails."""
+        from fixture_service.__main__ import main
+        import psycopg2
+
+        mock_config = MagicMock()
+        mock_config.aws_region = "us-east-1"
+        mock_config.database_url = "postgresql://test"
+        mock_config_cls.from_env.return_value = mock_config
+
+        mock_conn = MagicMock()
+        # First connection attempt fails, second succeeds
+        mock_ensure_conn.side_effect = [
+            psycopg2.OperationalError("connection refused"),
+            mock_conn,
+        ]
+        mock_run.side_effect = KeyboardInterrupt()
+
+        main()
+
+        # _ensure_connection was called twice (failed + succeeded)
+        assert mock_ensure_conn.call_count == 2
+        # run_indexer was called once (after successful connection)
+        mock_run.assert_called_once()
+        # Sleep was called for backoff
+        mock_sleep.assert_called()
 
 
 class TestEndToEndPipeline:
@@ -944,8 +1075,8 @@ class TestEndToEndPipeline:
                 fixture_id=f"fix-{i}",
                 recorded_at=f"2026-03-21T14:{i:02d}:00Z",
             )
-            # Each fixture has different content (different recorded_at + fixture_id)
-            fixture["output"] = {"price": i * 10.0}
+            # Each fixture has different dedup-relevant content (different input)
+            fixture["input"] = {"body": {"item": f"widget-{i}", "qty": i}}
             s3_key = f"fixtures/pricing-api/post_quote/2026-03-21/fix-{i}.json"
             sqs_msg = _make_sqs_message(s3_key)
 

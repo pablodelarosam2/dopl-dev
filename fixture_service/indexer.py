@@ -22,9 +22,11 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 import psycopg2
+import psycopg2.extras
 from botocore.exceptions import ClientError
 
 from fixture_service.config import IndexerConfig
@@ -204,13 +206,11 @@ def download_and_parse(s3_client: Any, bucket: str, s3_key: str) -> Dict[str, An
 # ---------------------------------------------------------------------------
 
 def compute_content_hash(fixture: Dict[str, Any]) -> str:
-    """Compute SHA-256 content hash of a fixture for deduplication.
+    """SHA-256 of the canonical request + stubs body for deduplication.
 
-    The hash covers the full fixture body using canonical JSON serialization
-    (sorted keys, no whitespace) to ensure determinism regardless of key order.
-
-    This is the deduplication identity per the architectural invariant:
-    "Same hash = same fixture."
+    Only fields that define the fixture's semantic identity are included.
+    Metadata fields (recorded_at, fixture_id, duration_ms, run_id) are
+    excluded because they differ between recordings of the same request.
 
     Args:
         fixture: Parsed fixture dict.
@@ -218,7 +218,13 @@ def compute_content_hash(fixture: Dict[str, Any]) -> str:
     Returns:
         64-character lowercase hex SHA-256 digest.
     """
-    canonical = json.dumps(fixture, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    dedup_fields = {
+        "input": fixture.get("input"),
+        "stubs": fixture.get("stubs"),
+        "method": fixture.get("method", ""),
+        "path": fixture.get("path", ""),
+    }
+    canonical = json.dumps(dedup_fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -260,7 +266,11 @@ def extract_metadata(
     """
     method = fixture.get("method", "")
     path = fixture.get("path", "")
-    recorded_at = fixture.get("recorded_at", "") or event_time
+    recorded_at_str = fixture.get("recorded_at") or event_time or ""
+    if recorded_at_str:
+        recorded_at = recorded_at_str  # Postgres can parse ISO 8601
+    else:
+        recorded_at = datetime.now(timezone.utc).isoformat()
     tags = fixture.get("tags", {}) if fixture.get("tags") is not None else {}
 
     return FixtureMetadata(
@@ -328,7 +338,7 @@ def insert_index_row(
         s3_bucket: S3 bucket name (used to construct s3_uri).
     """
     s3_uri = f"s3://{s3_bucket}/{s3_key}"
-    tags_json = json.dumps(metadata.tags, sort_keys=True)
+    tags_value = psycopg2.extras.Json(metadata.tags)
 
     cursor.execute(
         """
@@ -346,7 +356,7 @@ def insert_index_row(
             "content_hash": content_hash,
             "s3_uri": s3_uri,
             "recorded_at": metadata.recorded_at,
-            "tags": tags_json,
+            "tags": tags_value,
         },
     )
 
