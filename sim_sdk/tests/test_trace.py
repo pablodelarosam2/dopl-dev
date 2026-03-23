@@ -686,3 +686,141 @@ class TestRoundtrip:
 
         assert r1 == 1
         assert r2 == 2
+
+
+# ---------------------------------------------------------------------------
+# AC10: FixtureEvent includes method, path, service fields
+# ---------------------------------------------------------------------------
+
+class TestFixtureEventMetadata:
+    def test_method_path_service_in_event(self):
+        """FixtureEvent includes method, path, service with defaults."""
+        from sim_sdk.fixture.schema import FixtureEvent
+        event = FixtureEvent(fixture_id="test", qualname="f", run_id="r", recorded_at="now")
+        assert event.method == ""
+        assert event.path == ""
+        assert event.service == ""
+
+    def test_to_dict_includes_metadata(self):
+        """to_dict() serializes method, path, service."""
+        from sim_sdk.fixture.schema import FixtureEvent
+        event = FixtureEvent(
+            fixture_id="test", qualname="f", run_id="r", recorded_at="now",
+            method="POST", path="/quote", service="pricing-api",
+        )
+        d = event.to_dict()
+        assert d["method"] == "POST"
+        assert d["path"] == "/quote"
+        assert d["service"] == "pricing-api"
+
+
+# ---------------------------------------------------------------------------
+# AC11: Sampling gate skips emission
+# ---------------------------------------------------------------------------
+
+class TestSamplingGate:
+    def test_rate_0_skips_emission(self):
+        """SIM_SAMPLE_RATE=0 means no events emitted."""
+        import os
+        from unittest import mock
+
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        with mock.patch.dict(os.environ, {"SIM_SAMPLE_RATE": "0"}):
+            result = add(2, 3)
+
+        assert result == 5  # Function still executes
+        assert len(sink.events) == 0  # But no event emitted
+
+    def test_rate_1_emits_normally(self):
+        """SIM_SAMPLE_RATE=1 (default) emits events as usual."""
+        import os
+        from unittest import mock
+
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        with mock.patch.dict(os.environ, {"SIM_SAMPLE_RATE": "1.0"}):
+            add(2, 3)
+
+        assert len(sink.events) == 1
+
+    def test_nested_trace_inherits_sampling_decision(self):
+        """Inner @sim_trace calls are NOT independently sampled."""
+        import os
+        from unittest import mock
+
+        @sim_trace
+        def inner(x):
+            return x * 2
+
+        @sim_trace
+        def outer(x):
+            return inner(x) + 1
+
+        ctx, sink = make_record_ctx()
+        # Rate=0 should skip the outer, so inner is never called in record mode
+        with mock.patch.dict(os.environ, {"SIM_SAMPLE_RATE": "0"}):
+            result = outer(5)
+
+        assert result == 11
+        assert len(sink.events) == 0
+
+
+# ---------------------------------------------------------------------------
+# AC12: Events include method/path/service from context
+# ---------------------------------------------------------------------------
+
+class TestEventMetadataFromContext:
+    def test_method_path_from_context(self):
+        """FixtureEvent picks up http_method/http_path from SimContext."""
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        ctx.http_method = "POST"
+        ctx.http_path = "/quote"
+
+        add(2, 3)
+
+        event = sink.events[0]
+        assert event.method == "POST"
+        assert event.path == "/quote"
+
+    def test_service_from_context(self):
+        """FixtureEvent picks up service from SimContext."""
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        ctx.http_method = "POST"
+        ctx.http_path = "/quote"
+        ctx.service = "pricing-api"
+
+        add(2, 3)
+
+        event = sink.events[0]
+        assert event.method == "POST"
+        assert event.path == "/quote"
+        assert event.service == "pricing-api"
+
+    def test_defaults_when_not_set(self):
+        """method/path/service default to empty when context has no metadata."""
+        @sim_trace
+        def add(a, b):
+            return a + b
+
+        ctx, sink = make_record_ctx()
+        add(2, 3)
+
+        event = sink.events[0]
+        assert event.method == ""
+        assert event.path == ""
+        assert event.service == ""

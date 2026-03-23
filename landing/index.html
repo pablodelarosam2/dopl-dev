@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>dopl — Catch the bugs your tests miss</title>
+  <meta name="description" content="dopl records real service interactions and replays them deterministically, catching '200 OK but wrong' regressions before production.">
+  <meta property="og:title" content="dopl — Catch the bugs your tests miss">
+  <meta property="og:description" content="dopl records real service interactions and replays them deterministically, catching '200 OK but wrong' regressions before production.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%233fb950'/><text x='16' y='22' text-anchor='middle' font-size='18' font-weight='bold' fill='white' font-family='sans-serif'>d</text></svg>">
+  <style>
+    /* ── Reset ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── Custom Properties ── */
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --border: #30363d;
+      --text-primary: #c9d1d9;
+      --text-secondary: #9da5ae; /* bumped from #8b949e for WCAG AA compliance */
+      --accent-green: #3fb950;
+      --accent-green-hover: #2ea043;
+      --accent-blue: #58a6ff;
+      --accent-blue-hover: #79b8ff;
+      --accent-red: #f78166;
+      --accent-purple: #d2a8ff;
+      --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+      --font-code: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    /* ── Base ── */
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { color: var(--accent-blue-hover); }
+
+    h1, h2, h3 { font-weight: 700; line-height: 1.2; }
+
+    .sr-only {
+      position: absolute; width: 1px; height: 1px;
+      padding: 0; margin: -1px; overflow: hidden;
+      clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 2rem;
+      background: linear-gradient(180deg, var(--bg-primary), var(--bg-secondary));
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        radial-gradient(circle, var(--border) 1px, transparent 1px);
+      background-size: 32px 32px;
+      opacity: 0.3;
+      pointer-events: none;
+    }
+    .hero h1 {
+      font-size: 3.5rem;
+      font-weight: 800;
+      color: #fff;
+      margin-bottom: 1.5rem;
+      position: relative;
+    }
+    .hero .subtitle {
+      max-width: 640px;
+      color: var(--text-secondary);
+      font-size: 1.25rem;
+      margin-bottom: 2rem;
+      position: relative;
+    }
+    .subscribe-form {
+      display: flex;
+      gap: 0.5rem;
+      max-width: 440px;
+      width: 100%;
+      position: relative;
+    }
+    .subscribe-form input[type="email"] {
+      flex: 1;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-family: var(--font-body);
+      outline: none;
+    }
+    .subscribe-form input[type="email"]:focus {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.3);
+    }
+    .subscribe-form button {
+      background: var(--accent-green);
+      color: #fff;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: var(--font-body);
+      white-space: nowrap;
+    }
+    .subscribe-form button:hover { background: var(--accent-green-hover); }
+    .subscribe-form button:focus-visible {
+      outline: 2px solid var(--accent-blue);
+      outline-offset: 2px;
+    }
+    .terminal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      max-width: 500px;
+      width: 100%;
+      font-family: var(--font-code);
+      font-size: 0.9rem;
+      text-align: left;
+      margin-top: 3rem;
+      position: relative;
+    }
+    .terminal-line {
+      padding: 0.25rem 0;
+      opacity: 0;
+    }
+    .terminal.animate .terminal-line {
+      animation: fadeIn 0.5s ease forwards;
+    }
+    .terminal.animate .terminal-line:nth-child(1) { animation-delay: 0.5s; }
+    .terminal.animate .terminal-line:nth-child(2) { animation-delay: 1.5s; }
+    .terminal.animate .terminal-line:nth-child(3) { animation-delay: 2.5s; }
+    .terminal.animate .terminal-line:nth-child(4) { animation-delay: 3.5s; }
+    .terminal-prompt { color: var(--accent-green); }
+    .terminal-output { color: var(--text-secondary); }
+    .terminal-success { color: var(--accent-green); }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Primitives Tabs ── */
+    .primitives { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .primitives h2 { text-align: center; font-size: 2rem; margin-bottom: 0.5rem; }
+    .primitives .subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 2.5rem; }
+    [role="tablist"] {
+      display: flex; gap: 0; border-bottom: 1px solid var(--border);
+      margin-bottom: 2rem;
+    }
+    [role="tab"] {
+      background: none; border: none; border-bottom: 2px solid transparent;
+      color: var(--text-secondary); font-family: var(--font-code);
+      padding: 0.75rem 1.25rem; cursor: pointer; font-size: 0.95rem;
+    }
+    [role="tab"][aria-selected="true"] {
+      color: var(--text-primary); border-bottom-color: var(--accent-blue);
+    }
+    [role="tab"]:hover { color: var(--text-primary); }
+    [role="tab"]:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+    [role="tabpanel"] { display: none; }
+    [role="tabpanel"].active { display: block; }
+    .tab-description { margin-bottom: 1.25rem; font-size: 1.05rem; }
+    .tab-code {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      overflow-x: auto;
+      font-family: var(--font-code);
+      font-size: 0.85rem;
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    .mode-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    .mode-grid .mode-label {
+      font-family: var(--font-code);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.5rem;
+    }
+    .mode-grid .mode-record .mode-label { color: var(--accent-green); }
+    .mode-grid .mode-replay .mode-label { color: var(--accent-blue); }
+    .mode-grid p { font-size: 0.9rem; color: var(--text-secondary); }
+
+    /* ── Code Example ── */
+    .code-example { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .code-example h2 { text-align: center; font-size: 2rem; margin-bottom: 0.5rem; }
+    .code-example .subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 2.5rem; }
+    .code-block {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      overflow-x: auto;
+      font-family: var(--font-code);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+    .code-block .kw { color: #ff7b72; }
+    .code-block .str { color: #a5d6ff; }
+    .code-block .fn { color: #d2a8ff; }
+    .code-block .cm { color: #8b949e; }
+    .code-block .dec { color: #ffa657; }
+    .code-block .op { color: var(--text-primary); }
+    .code-block .num { color: #79c0ff; }
+
+    /* ── Benefits ── */
+    .benefits { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .benefits h2 { text-align: center; font-size: 2rem; margin-bottom: 2rem; }
+    .benefits-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 2rem;
+    }
+    .benefit {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      transition: border-color 0.2s;
+    }
+    .benefit:hover { border-color: var(--accent-blue); }
+    .benefit svg { color: var(--accent-blue); margin-bottom: 1rem; }
+    .benefit h3 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+    .benefit p { color: var(--text-secondary); font-size: 0.9rem; }
+
+    /* ── Subscribe Footer ── */
+    .subscribe {
+      padding: 6rem 2rem;
+      background: var(--bg-secondary);
+      text-align: center;
+    }
+    .subscribe h2 { font-size: 2rem; margin-bottom: 0.75rem; }
+    .subscribe .subtitle { color: var(--text-secondary); margin-bottom: 2rem; }
+    .subscribe .subscribe-form { margin: 0 auto; }
+    .form-message {
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+      min-height: 1.5em;
+    }
+    .form-message.success { color: var(--accent-green); }
+    .form-message.error { color: var(--accent-red); }
+    .form-message.info { color: var(--accent-blue); }
+    footer {
+      padding: 2rem;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+    }
+
+    /* ── Nav ── */
+    .nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 1rem 2rem;
+      background: rgba(13, 17, 23, 0.8);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo {
+      font-family: var(--font-code);
+      font-weight: 700;
+      font-size: 1.25rem;
+      color: var(--accent-green);
+      text-decoration: none;
+    }
+    .nav-cta {
+      color: var(--accent-green);
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    .nav-cta:hover { color: var(--accent-green-hover); }
+
+    /* ── Problem Statement ── */
+    .problem { padding: 6rem 2rem; max-width: 900px; margin: 0 auto; }
+    .problem h2 { text-align: center; font-size: 2rem; margin-bottom: 0.75rem; }
+    .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 2rem; }
+    .panel {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+    }
+    .panel-without { border-color: var(--accent-red); }
+    .panel-with { border-color: var(--accent-green); }
+    .panel h3 {
+      text-transform: uppercase;
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      margin-bottom: 1.25rem;
+      color: var(--text-secondary);
+    }
+    .panel-without h3 { color: var(--accent-red); }
+    .panel-with h3 { color: var(--accent-green); }
+    .checklist { list-style: none; }
+    .checklist li {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 0;
+      font-size: 0.95rem;
+    }
+    .checklist .icon-pass { color: var(--accent-green); }
+    .checklist .icon-fail { color: var(--accent-red); }
+    .checklist .fail-text { color: var(--accent-red); }
+
+    /* ── Responsive ── */
+    @media (max-width: 1024px) {
+      .comparison { grid-template-columns: 1fr; }
+      .benefits-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 767px) {
+      .hero h1 { font-size: 2.25rem; }
+      .hero .subtitle { font-size: 1.05rem; }
+      .subscribe-form { flex-direction: column; }
+      [role="tablist"] { display: none; }
+      [role="tabpanel"] {
+        display: block !important;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 2rem;
+        margin-bottom: 2rem;
+      }
+      [role="tabpanel"]::before {
+        content: attr(aria-label);
+        display: block;
+        font-family: var(--font-code);
+        font-weight: 600;
+        color: var(--accent-blue);
+        margin-bottom: 1rem;
+        font-size: 1rem;
+      }
+      .mode-grid { grid-template-columns: 1fr; }
+      .benefits-grid { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .terminal-line { animation: none; opacity: 1; }
+      * { transition-duration: 0.01ms !important; }
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Nav -->
+  <nav class="nav">
+    <a href="#hero" class="nav-logo">dopl</a>
+    <a href="#hero" class="nav-cta">Get Early Access</a>
+  </nav>
+
+  <!-- Section 1: Hero -->
+  <section id="hero" class="hero">
+    <h1>Catch the bugs your tests miss</h1>
+    <p class="subtitle">dopl records real service interactions and replays them deterministically — catching '200 OK but wrong' regressions before they reach production.</p>
+    <form class="subscribe-form" aria-label="Subscribe for early access">
+      <label for="hero-email" class="sr-only">Email address</label>
+      <input type="email" id="hero-email" placeholder="your@email.com" required>
+      <button type="submit">Get Early Access</button>
+    </form>
+    <div class="form-message"></div>
+    <div class="terminal" aria-hidden="true">
+      <div class="terminal-line"><span class="terminal-prompt">$</span> dopl record</div>
+      <div class="terminal-line"><span class="terminal-output">▓▓▓▓▓▓▓▓▓▓ 47 fixtures captured</span></div>
+      <div class="terminal-line"><span class="terminal-prompt">$</span> dopl replay --pr 142</div>
+      <div class="terminal-line"><span class="terminal-output terminal-success">▓▓▓▓▓▓▓▓▓▓ 0 regressions found ✓</span></div>
+    </div>
+    <span class="sr-only">Terminal demo showing dopl recording 47 fixtures and replaying with 0 regressions found.</span>
+  </section>
+
+  <!-- Section 2: Problem Statement -->
+  <section id="problem" class="problem">
+    <h2>The problem with '200 OK'</h2>
+    <div class="comparison">
+      <div class="panel panel-without">
+        <h3>Without dopl</h3>
+        <ul class="checklist">
+          <li><span class="icon-pass">✓</span> Unit tests pass</li>
+          <li><span class="icon-pass">✓</span> Integration tests pass</li>
+          <li><span class="icon-pass">✓</span> Deploy to production</li>
+          <li><span class="icon-fail">✗</span> <span class="fail-text">Customer reports wrong prices</span></li>
+        </ul>
+      </div>
+      <div class="panel panel-with">
+        <h3>With dopl</h3>
+        <ul class="checklist">
+          <li><span class="icon-pass">✓</span> Record baseline fixtures</li>
+          <li><span class="icon-pass">✓</span> Replay against PR</li>
+          <li><span class="icon-pass">✓</span> Diff caught wrong prices</li>
+          <li><span class="icon-pass">✓</span> Blocked before merge</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 3: How It Works — Primitives -->
+  <section id="primitives" class="primitives">
+    <h2>How it works</h2>
+    <p class="subtitle">Four composable primitives that record and replay any side effect.</p>
+
+    <div role="tablist" aria-label="dopl primitives">
+      <button role="tab" id="tab-trace" aria-controls="panel-trace" aria-selected="true">@sim_trace</button>
+      <button role="tab" id="tab-capture" aria-controls="panel-capture" aria-selected="false">sim_capture()</button>
+      <button role="tab" id="tab-db" aria-controls="panel-db" aria-selected="false">sim_db()</button>
+      <button role="tab" id="tab-http" aria-controls="panel-http" aria-selected="false">sim_http()</button>
+    </div>
+
+    <div role="tabpanel" id="panel-trace" aria-label="@sim_trace" aria-labelledby="tab-trace" class="active">
+      <p class="tab-description">Wrap any function to record its inputs and outputs. On replay, the function body is skipped entirely.</p>
+      <pre class="tab-code"><code><span class="dec">@sim_trace</span>
+<span class="kw">def</span> <span class="fn">calculate_quote</span>(user_id, items):
+    <span class="cm"># In record: executes normally, captures result</span>
+    <span class="cm"># In replay: returns recorded result, body never runs</span>
+    <span class="kw">return</span> {<span class="str">"total"</span>: <span class="num">99.50</span>, <span class="str">"tax"</span>: <span class="num">8.25</span>}</code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>Executes function, captures {inputs → output} as a fixture</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Computes fingerprint from args, returns stored output without executing</p></div>
+      </div>
+    </div>
+
+    <div role="tabpanel" id="panel-capture" aria-label="sim_capture()" aria-labelledby="tab-capture">
+      <p class="tab-description">Capture any local side effect — tax lookups, pricing engines, internal computations.</p>
+      <pre class="tab-code"><code><span class="kw">with</span> <span class="fn">sim_capture</span>(<span class="str">"tax_service"</span>) <span class="kw">as</span> cap:
+    <span class="kw">if not</span> cap.replaying:
+        tax_rate <span class="op">=</span> tax_api.lookup(user_id)
+        cap.set_result({<span class="str">"rate"</span>: tax_rate})
+    tax <span class="op">=</span> cap.result[<span class="str">"rate"</span>]</code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>Block executes, <code>set_result()</code> stores the value</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Block skipped, <code>cap.result</code> returns recorded value</p></div>
+      </div>
+    </div>
+
+    <div role="tabpanel" id="panel-db" aria-label="sim_db()" aria-labelledby="tab-db">
+      <p class="tab-description">Wrap any database cursor to record queries and results. Writes are blocked in replay to prevent mutations.</p>
+      <pre class="tab-code"><code><span class="kw">with</span> <span class="fn">sim_db</span>(db, name<span class="op">=</span><span class="str">"products"</span>) <span class="kw">as</span> sdb:
+    rows <span class="op">=</span> sdb.query(<span class="str">"SELECT price FROM products WHERE sku = %s"</span>, [sku])
+    <span class="cm"># INSERT/UPDATE blocked in replay → SimWriteBlockedError</span></code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>Queries execute normally, results captured</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Returns recorded rows; INSERT/UPDATE/DELETE raise <code>SimWriteBlockedError</code></p></div>
+      </div>
+    </div>
+
+    <div role="tabpanel" id="panel-http" aria-label="sim_http()" aria-labelledby="tab-http">
+      <p class="tab-description">Wrap any HTTP client to record requests and responses. No network calls in replay.</p>
+      <pre class="tab-code"><code><span class="kw">with</span> <span class="fn">sim_http</span>(http_client, name<span class="op">=</span><span class="str">"shipping"</span>) <span class="kw">as</span> client:
+    resp <span class="op">=</span> client.get(<span class="str">"https://api.shipping.co/v1/rate"</span>, params<span class="op">=</span>{<span class="str">"weight"</span>: <span class="num">2.5</span>})
+    cost <span class="op">=</span> resp.json()[<span class="str">"cost"</span>]</code></pre>
+      <div class="mode-grid">
+        <div class="mode-record"><div class="mode-label">Record</div><p>HTTP request executes, response captured</p></div>
+        <div class="mode-replay"><div class="mode-label">Replay</div><p>Returns <code>FakeResponse</code> with recorded data, no network call</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 4: Code Example -->
+  <section id="code-example" class="code-example">
+    <h2>See it in action</h2>
+    <p class="subtitle">One function, four primitives. Record everything, replay deterministically.</p>
+    <div class="code-block">
+      <pre><code><span class="dec">@sim_trace</span>  <span class="cm"># ← Record inputs/output, skip body on replay</span>
+<span class="kw">def</span> <span class="fn">calculate_quote</span>(user_id, items):
+    <span class="cm"># Database reads: recorded, writes: blocked in replay</span>
+    <span class="kw">with</span> <span class="fn">sim_db</span>(db, name<span class="op">=</span><span class="str">"products"</span>) <span class="kw">as</span> sdb:
+        products <span class="op">=</span> sdb.query(
+            <span class="str">"SELECT sku, price FROM products WHERE sku IN %s"</span>, [items]
+        )
+
+    <span class="cm"># Capture any local side effect</span>
+    <span class="kw">with</span> <span class="fn">sim_capture</span>(<span class="str">"tax_service"</span>) <span class="kw">as</span> cap:
+        <span class="kw">if not</span> cap.replaying:
+            cap.set_result({<span class="str">"rate"</span>: tax_api.lookup(user_id)})
+        tax_rate <span class="op">=</span> cap.result[<span class="str">"rate"</span>]
+
+    <span class="cm"># HTTP calls: real in record, fake response in replay</span>
+    <span class="kw">with</span> <span class="fn">sim_http</span>(shipping_client, name<span class="op">=</span><span class="str">"shipping"</span>) <span class="kw">as</span> client:
+        resp <span class="op">=</span> client.get(<span class="str">"/v1/rate"</span>, params<span class="op">=</span>{<span class="str">"weight"</span>: total_weight})
+        shipping <span class="op">=</span> resp.json()[<span class="str">"cost"</span>]
+
+    subtotal <span class="op">=</span> <span class="fn">sum</span>(p[<span class="str">"price"</span>] <span class="kw">for</span> p <span class="kw">in</span> products)
+    <span class="kw">return</span> {
+        <span class="str">"subtotal"</span>: subtotal,
+        <span class="str">"tax"</span>: subtotal <span class="op">*</span> tax_rate,
+        <span class="str">"shipping"</span>: shipping,
+        <span class="str">"total"</span>: subtotal <span class="op">*</span> (<span class="num">1</span> <span class="op">+</span> tax_rate) <span class="op">+</span> shipping,
+    }</code></pre>
+    </div>
+  </section>
+
+  <!-- Section 5: Benefits -->
+  <section id="benefits" class="benefits">
+    <h2>Why dopl</h2>
+    <div class="benefits-grid">
+      <div class="benefit">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M2.5 22v-6h6"/><path d="M22 11.5A10 10 0 0 0 3.2 7.2"/><path d="M2 12.5a10 10 0 0 0 18.8 4.3"/></svg>
+        <h3>Deterministic</h3>
+        <p>Same inputs, same outputs, every time.</p>
+      </div>
+      <div class="benefit">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.402 2.402 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77c.24-.24.581-.353.917-.303.515.077.877.528 1.073 1.01a2.5 2.5 0 1 0 3.259-3.259c-.482-.196-.933-.558-1.01-1.073-.05-.336.062-.676.303-.917l1.525-1.525A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z"/></svg>
+        <h3>Framework-Agnostic</h3>
+        <p>Works with Flask, FastAPI, Django, or plain Python.</p>
+      </div>
+      <div class="benefit">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        <h3>Zero Overhead</h3>
+        <p>Off mode has zero performance impact in production.</p>
+      </div>
+      <div class="benefit">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>
+        <h3>No Mocks Required</h3>
+        <p>Record real interactions, no manual stub writing.</p>
+      </div>
+      <div class="benefit">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+        <h3>CI/CD Ready</h3>
+        <p>Runs in your pipeline, blocks regressions before merge.</p>
+      </div>
+      <div class="benefit">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
+        <h3>Protocol-Agnostic</h3>
+        <p>HTTP, gRPC, database, any side effect.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 6: Subscribe -->
+  <section id="subscribe" class="subscribe">
+    <h2>Stay in the loop</h2>
+    <p class="subtitle">We'll notify you when dopl is ready for early access. No spam.</p>
+    <form class="subscribe-form" aria-label="Subscribe for updates">
+      <label for="footer-email" class="sr-only">Email address</label>
+      <input type="email" id="footer-email" placeholder="your@email.com" required>
+      <button type="submit">Subscribe</button>
+    </form>
+    <div class="form-message"></div>
+  </section>
+
+  <footer>dopl — Deterministic Operation Persistence Layer</footer>
+
+  <script>
+    // Subscribe form handler (shared by hero + footer forms)
+    function handleSubscribe(form) {
+      const input = form.querySelector('input[type="email"]');
+      const msg = form.nextElementSibling;
+      const email = input.value.trim();
+
+      if (!email) {
+        msg.textContent = 'Please enter your email address';
+        msg.className = 'form-message error';
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        msg.textContent = 'Please enter a valid email address';
+        msg.className = 'form-message error';
+        return;
+      }
+
+      try {
+        const subs = JSON.parse(localStorage.getItem('dopl_subscribers') || '[]');
+        if (subs.some(s => s.email === email)) {
+          msg.textContent = "You're already subscribed!";
+          msg.className = 'form-message info';
+          return;
+        }
+        subs.push({ email, timestamp: new Date().toISOString() });
+        localStorage.setItem('dopl_subscribers', JSON.stringify(subs));
+      } catch (e) {
+        console.warn('localStorage unavailable — email not persisted');
+      }
+
+      msg.textContent = "You're on the list! We'll be in touch.";
+      msg.className = 'form-message success';
+      input.value = '';
+    }
+
+    document.querySelectorAll('.subscribe-form').forEach(form => {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        handleSubscribe(form);
+      });
+    });
+
+    // Tab switching
+    document.querySelectorAll('[role="tab"]').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('[role="tab"]').forEach(t => t.setAttribute('aria-selected', 'false'));
+        document.querySelectorAll('[role="tabpanel"]').forEach(p => p.classList.remove('active'));
+        tab.setAttribute('aria-selected', 'true');
+        document.getElementById(tab.getAttribute('aria-controls')).classList.add('active');
+      });
+      tab.addEventListener('keydown', (e) => {
+        const tabs = [...document.querySelectorAll('[role="tab"]')];
+        const idx = tabs.indexOf(tab);
+        if (e.key === 'ArrowRight') { tabs[(idx + 1) % tabs.length].focus(); tabs[(idx + 1) % tabs.length].click(); }
+        if (e.key === 'ArrowLeft') { tabs[(idx - 1 + tabs.length) % tabs.length].focus(); tabs[(idx - 1 + tabs.length) % tabs.length].click(); }
+      });
+    });
+
+    // Terminal animation — trigger on scroll into view
+    const terminal = document.querySelector('.terminal');
+    if (terminal) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            terminal.classList.add('animate');
+          }
+        });
+      }, { threshold: 0.5 });
+      observer.observe(terminal);
+    }
+  </script>
+</body>
+</html>

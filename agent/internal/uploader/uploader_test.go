@@ -571,3 +571,63 @@ func TestConfigValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadUsesStructuredKey(t *testing.T) {
+	dir := t.TempDir()
+	client := &mockS3Client{}
+
+	// Create a fixture with method/path/service metadata in the payload.
+	payload := map[string]any{
+		"schema_version": 1,
+		"fixture_id":     "fix-structured",
+		"session_id":     "sess-1",
+		"created_at_ms":  time.Date(2026, 3, 21, 14, 30, 0, 0, time.UTC).UnixMilli(),
+		"service":        "pricing-api",
+		"golden_output": map[string]any{
+			"method": "POST",
+			"path":   "/quote",
+		},
+	}
+	fi := writeFixtureFile(t, dir, "fix-structured", payload)
+	lister := &mockSpoolLister{fixtures: []spool.FixtureInfo{fi}}
+
+	cfg := testConfig()
+	cfg.ScanInterval = 20 * time.Millisecond
+	u, err := New(client, lister, cfg, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		u.Run(ctx)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if u.UploadsCompleted() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for upload")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	<-done
+
+	calls := client.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 S3 call, got %d", len(calls))
+	}
+
+	// The key should be structured: fixtures/pricing-api/post_quote/2026-03-21/fix-structured.json
+	wantKey := "fixtures/pricing-api/post_quote/2026-03-21/fix-structured.json"
+	if calls[0].Key != wantKey {
+		t.Errorf("S3 key = %q, want %q", calls[0].Key, wantKey)
+	}
+}

@@ -3,6 +3,7 @@ package uploader
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"time"
@@ -45,8 +46,9 @@ func (u *Uploader) processFixture(ctx context.Context, fi spool.FixtureInfo) {
 		return
 	}
 
-	// Upload to S3 with retries.
-	key := s3Key(u.cfg.Prefix, fi.FixtureID)
+	// Build S3 key: try structured key from fixture metadata, fall back to flat.
+	key := u.buildKeyFromFixture(data, fi.FixtureID)
+
 	err = u.uploadWithRetry(ctx, key, data)
 	if err != nil {
 		u.log.Error("upload failed after retries",
@@ -78,6 +80,54 @@ func (u *Uploader) processFixture(ctx context.Context, fi spool.FixtureInfo) {
 		"key", key,
 		"bytes", len(data),
 	)
+}
+
+// fixtureMetadata is the subset of fixture JSON fields used for S3 key construction.
+type fixtureMetadata struct {
+	Service      json.RawMessage `json:"service"`
+	CreatedAtMs  int64           `json:"created_at_ms"`
+	GoldenOutput json.RawMessage `json:"golden_output"`
+}
+
+// goldenOutputMeta extracts method/path from the golden_output payload.
+type goldenOutputMeta struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+// buildKeyFromFixture parses the fixture JSON to extract metadata for structured
+// key generation. Falls back to the legacy flat key if metadata is incomplete.
+func (u *Uploader) buildKeyFromFixture(data []byte, fixtureID string) string {
+	var meta fixtureMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		u.log.Debug("cannot parse fixture metadata, using flat key",
+			"fixture_id", fixtureID, "error", err)
+		return s3Key(u.cfg.Prefix, fixtureID)
+	}
+
+	// Extract service name (stored as a JSON string in RawMessage).
+	var service string
+	if len(meta.Service) > 0 {
+		if err := json.Unmarshal(meta.Service, &service); err != nil {
+			u.log.Debug("cannot parse service field, using flat key",
+				"fixture_id", fixtureID, "error", err)
+			return s3Key(u.cfg.Prefix, fixtureID)
+		}
+	}
+
+	// Extract method/path from golden_output payload.
+	var output goldenOutputMeta
+	if len(meta.GoldenOutput) > 0 {
+		if err := json.Unmarshal(meta.GoldenOutput, &output); err != nil {
+			u.log.Debug("cannot parse golden_output metadata, using flat key",
+				"fixture_id", fixtureID, "error", err)
+			return s3Key(u.cfg.Prefix, fixtureID)
+		}
+	}
+
+	createdAt := time.UnixMilli(meta.CreatedAtMs)
+
+	return structuredS3Key(service, output.Method, output.Path, fixtureID, createdAt)
 }
 
 // uploadWithRetry attempts PutObject up to MaxRetries times with exponential

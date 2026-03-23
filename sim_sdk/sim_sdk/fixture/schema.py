@@ -29,6 +29,9 @@ class FixtureEvent:
     ordinal: int = 0
     storage_key: Optional[str] = None
     event_type: str = "Metadata"
+    method: str = ""
+    path: str = ""
+    service: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -46,4 +49,7 @@ class FixtureEvent:
             "ordinal": self.ordinal,
             "storage_key": self.storage_key,
             "event_type": self.event_type,
+            "method": self.method,
+            "path": self.path,
+            "service": self.service,
         }
