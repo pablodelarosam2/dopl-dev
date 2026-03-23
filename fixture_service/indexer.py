@@ -214,3 +214,55 @@ def compute_content_hash(fixture: Dict[str, Any]) -> str:
     """
     canonical = json.dumps(fixture, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class FixtureMetadata:
+    """Combined metadata for a fixture, extracted from S3 key + fixture JSON."""
+
+    service: str
+    method: str
+    path: str
+    endpoint_key: str
+    recorded_at: str
+    tags: Dict[str, Any]
+    fixture_id: str
+
+
+# ---------------------------------------------------------------------------
+# Metadata Extraction
+# ---------------------------------------------------------------------------
+
+def extract_metadata(
+    fixture: Dict[str, Any],
+    key_meta: S3KeyMetadata,
+    event_time: str = "",
+) -> FixtureMetadata:
+    """Extract metadata from a parsed fixture and its S3 key components.
+
+    - service and endpoint_key come from the S3 key (the key is the contract).
+    - method, path, recorded_at, and tags come from the fixture JSON body.
+    - If recorded_at is missing from the fixture, falls back to event_time.
+
+    Args:
+        fixture: Parsed fixture dict.
+        key_meta: Metadata parsed from the S3 key.
+        event_time: Fallback timestamp from the S3 event notification.
+
+    Returns:
+        FixtureMetadata with all fields populated.
+    """
+    method = fixture.get("method", "")
+    path = fixture.get("path", "")
+    recorded_at = fixture.get("recorded_at", "") or event_time
+    tags = fixture.get("tags", {}) if fixture.get("tags") is not None else {}
+
+    return FixtureMetadata(
+        service=key_meta.service,
+        method=method,
+        path=path,
+        endpoint_key=key_meta.endpoint_key,
+        recorded_at=recorded_at,
+        tags=tags,
+        fixture_id=key_meta.fixture_id,
+    )

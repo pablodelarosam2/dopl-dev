@@ -304,3 +304,76 @@ class TestComputeContentHash:
         f2 = _make_fixture_json()
         f2["stubs"] = []  # remove stubs
         assert compute_content_hash(f1) != compute_content_hash(f2)
+
+
+class TestExtractMetadata:
+    """Tests for extract_metadata — combines S3 key metadata with fixture JSON fields."""
+
+    def test_extracts_all_fields(self):
+        """Extracts method, path, service, endpoint_key, recorded_at, tags from fixture + S3 key."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+
+        fixture = _make_fixture_json(method="POST", path="/quote", recorded_at="2026-03-21T14:30:00Z")
+        key_meta = S3KeyMetadata(service="pricing-api", endpoint_key="post_quote", date="2026-03-21", fixture_id="abc123")
+
+        meta = extract_metadata(fixture, key_meta)
+
+        assert meta.service == "pricing-api"
+        assert meta.method == "POST"
+        assert meta.path == "/quote"
+        assert meta.endpoint_key == "post_quote"
+        assert meta.recorded_at == "2026-03-21T14:30:00Z"
+        assert meta.tags == {}
+        assert meta.fixture_id == "abc123"
+
+    def test_uses_s3_key_service_not_fixture(self):
+        """Service comes from S3 key prefix, not fixture body."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+
+        fixture = _make_fixture_json()
+        key_meta = S3KeyMetadata(service="from-s3-key", endpoint_key="post_quote", date="2026-03-21", fixture_id="abc123")
+
+        meta = extract_metadata(fixture, key_meta)
+        assert meta.service == "from-s3-key"
+
+    def test_extracts_tags_from_fixture(self):
+        """Tags come from the optional 'tags' field in fixture JSON."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+
+        fixture = _make_fixture_json(tags={"scenario": "premium_user"})
+        key_meta = S3KeyMetadata(service="svc", endpoint_key="post_quote", date="2026-03-21", fixture_id="abc123")
+
+        meta = extract_metadata(fixture, key_meta)
+        assert meta.tags == {"scenario": "premium_user"}
+
+    def test_defaults_tags_to_empty_dict(self):
+        """Tags default to {} when not present in fixture JSON."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+
+        fixture = _make_fixture_json()
+        del fixture["tags"]
+        key_meta = S3KeyMetadata(service="svc", endpoint_key="post_quote", date="2026-03-21", fixture_id="abc123")
+
+        meta = extract_metadata(fixture, key_meta)
+        assert meta.tags == {}
+
+    def test_uses_endpoint_key_from_s3(self):
+        """endpoint_key comes from the S3 key, not recomputed from fixture method+path."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+
+        fixture = _make_fixture_json(method="POST", path="/quote")
+        key_meta = S3KeyMetadata(service="svc", endpoint_key="custom_key", date="2026-03-21", fixture_id="abc123")
+
+        meta = extract_metadata(fixture, key_meta)
+        assert meta.endpoint_key == "custom_key"
+
+    def test_falls_back_to_event_time_for_recorded_at(self):
+        """If fixture JSON has no recorded_at, falls back to event_time from S3 key date."""
+        from fixture_service.indexer import extract_metadata, S3KeyMetadata
+
+        fixture = _make_fixture_json()
+        del fixture["recorded_at"]
+        key_meta = S3KeyMetadata(service="svc", endpoint_key="post_quote", date="2026-03-21", fixture_id="abc123")
+
+        meta = extract_metadata(fixture, key_meta, event_time="2026-03-21T15:00:00Z")
+        assert meta.recorded_at == "2026-03-21T15:00:00Z"
