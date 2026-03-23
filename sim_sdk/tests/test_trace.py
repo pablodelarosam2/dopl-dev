@@ -686,3 +686,29 @@ class TestRoundtrip:
 
         assert r1 == 1
         assert r2 == 2
+
+
+# ---------------------------------------------------------------------------
+# AC10: FixtureEvent includes method, path, service fields
+# ---------------------------------------------------------------------------
+
+class TestFixtureEventMetadata:
+    def test_method_path_service_in_event(self):
+        """FixtureEvent includes method, path, service with defaults."""
+        from sim_sdk.fixture.schema import FixtureEvent
+        event = FixtureEvent(fixture_id="test", qualname="f", run_id="r", recorded_at="now")
+        assert event.method == ""
+        assert event.path == ""
+        assert event.service == ""
+
+    def test_to_dict_includes_metadata(self):
+        """to_dict() serializes method, path, service."""
+        from sim_sdk.fixture.schema import FixtureEvent
+        event = FixtureEvent(
+            fixture_id="test", qualname="f", run_id="r", recorded_at="now",
+            method="POST", path="/quote", service="pricing-api",
+        )
+        d = event.to_dict()
+        assert d["method"] == "POST"
+        assert d["path"] == "/quote"
+        assert d["service"] == "pricing-api"
