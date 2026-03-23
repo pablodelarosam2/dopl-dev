@@ -137,3 +137,28 @@ def parse_s3_key(s3_key: str) -> S3KeyMetadata:
         date=date,
         fixture_id=fixture_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Endpoint Key Generation
+# ---------------------------------------------------------------------------
+
+def build_endpoint_key(method: str, path: str) -> str:
+    """Build a slugified endpoint key from HTTP method and path.
+
+    Mirrors the daemon's key generation logic (Task 3.1 spec)::
+
+        endpoint_key = f"{method}_{path}".lower().replace("/", "_").strip("_")
+
+    Args:
+        method: HTTP method (e.g., "POST", "GET").
+        path: URL path (e.g., "/quote", "/checkout/status").
+
+    Returns:
+        Slugified endpoint key (e.g., "post_quote", "get_checkout_status").
+    """
+    raw = f"{method}_{path}".lower().replace("/", "_").strip("_")
+    # Collapse consecutive underscores caused by leading slash: POST + _/quote -> post__quote -> post_quote
+    while "__" in raw:
+        raw = raw.replace("__", "_")
+    return raw

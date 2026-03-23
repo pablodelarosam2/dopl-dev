@@ -139,3 +139,32 @@ class TestParseS3Key:
 
         with pytest.raises(ValueError, match="Invalid S3 key format"):
             parse_s3_key("other/svc/post_data/2026-01-01/id.json")
+
+
+class TestBuildEndpointKey:
+    """Tests for build_endpoint_key — slugifies method + path to match daemon logic."""
+
+    def test_simple_path(self):
+        from fixture_service.indexer import build_endpoint_key
+
+        assert build_endpoint_key("POST", "/quote") == "post_quote"
+
+    def test_nested_path(self):
+        from fixture_service.indexer import build_endpoint_key
+
+        assert build_endpoint_key("GET", "/checkout/status") == "get_checkout_status"
+
+    def test_strips_leading_trailing_underscores(self):
+        from fixture_service.indexer import build_endpoint_key
+
+        assert build_endpoint_key("GET", "/") == "get"
+
+    def test_lowercases_method(self):
+        from fixture_service.indexer import build_endpoint_key
+
+        assert build_endpoint_key("DELETE", "/users/123") == "delete_users_123"
+
+    def test_handles_trailing_slash(self):
+        from fixture_service.indexer import build_endpoint_key
+
+        assert build_endpoint_key("PUT", "/items/") == "put_items"
