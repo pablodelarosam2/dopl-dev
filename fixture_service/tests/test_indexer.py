@@ -520,3 +520,64 @@ class TestInsertIndexRow:
         # Should be a JSON string for psycopg2 JSONB compatibility
         parsed = json.loads(tags_value)
         assert parsed == {"env": "staging", "version": "2.1"}
+
+
+class TestIsDailyCapReached:
+    """Tests for is_daily_cap_reached — enforces max_fixtures_per_endpoint_per_day."""
+
+    def test_returns_false_when_under_cap(self):
+        """Not capped when today's count is below the maximum."""
+        from fixture_service.indexer import is_daily_cap_reached
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (50,)
+
+        result = is_daily_cap_reached(mock_cursor, "pricing-api", "post_quote", max_per_day=200)
+
+        assert result is False
+
+    def test_returns_true_when_at_cap(self):
+        """Capped when today's count equals the maximum."""
+        from fixture_service.indexer import is_daily_cap_reached
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (200,)
+
+        result = is_daily_cap_reached(mock_cursor, "pricing-api", "post_quote", max_per_day=200)
+
+        assert result is True
+
+    def test_returns_true_when_over_cap(self):
+        """Capped when today's count exceeds the maximum."""
+        from fixture_service.indexer import is_daily_cap_reached
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (250,)
+
+        result = is_daily_cap_reached(mock_cursor, "pricing-api", "post_quote", max_per_day=200)
+
+        assert result is True
+
+    def test_passes_correct_parameters(self):
+        """Passes service and endpoint_key to the query."""
+        from fixture_service.indexer import is_daily_cap_reached
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (0,)
+
+        is_daily_cap_reached(mock_cursor, "my-svc", "get_data", max_per_day=100)
+
+        params = mock_cursor.execute.call_args[0][1]
+        assert params[0] == "my-svc"
+        assert params[1] == "get_data"
+
+    def test_returns_false_when_count_is_zero(self):
+        """Not capped when no fixtures have been indexed today."""
+        from fixture_service.indexer import is_daily_cap_reached
+
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = (0,)
+
+        result = is_daily_cap_reached(mock_cursor, "svc", "ep", max_per_day=200)
+
+        assert result is False

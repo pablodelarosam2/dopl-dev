@@ -343,3 +343,40 @@ def insert_index_row(
             "tags": tags_json,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Daily Cap
+# ---------------------------------------------------------------------------
+
+def is_daily_cap_reached(
+    cursor: Any,
+    service: str,
+    endpoint_key: str,
+    max_per_day: int,
+) -> bool:
+    """Check if the daily fixture cap has been reached for a service+endpoint.
+
+    Layer 2 sampling: prevents runaway storage growth by capping the number
+    of fixtures indexed per endpoint per day.
+
+    Args:
+        cursor: A psycopg2 cursor (or mock).
+        service: Service name.
+        endpoint_key: Slugified endpoint key.
+        max_per_day: Maximum fixtures per endpoint per day.
+
+    Returns:
+        True if the cap has been reached or exceeded, False otherwise.
+    """
+    cursor.execute(
+        """
+        SELECT COUNT(*) FROM fixtures_index
+        WHERE service = %s
+          AND endpoint_key = %s
+          AND recorded_at >= CURRENT_DATE
+        """,
+        (service, endpoint_key),
+    )
+    count = cursor.fetchone()[0]
+    return count >= max_per_day
