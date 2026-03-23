@@ -26,6 +26,7 @@ from .context import SimContext, SimMode, get_context
 from .canonical import canonicalize_json, fingerprint
 from .fixture.schema import FixtureEvent
 from .replay_context import get_replay_context
+from .sampling import should_record
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,8 @@ def _emit_record(
         error=error_msg,
         ordinal=ordinal,
         event_type="Output",
+        method=ctx.http_method,
+        path=ctx.http_path,
     )
 
     if ctx.sink is not None:
@@ -226,6 +229,10 @@ def sim_trace(
                 if ctx.is_replaying:
                     return _replay(qualname, input_fp, args_data, ctx)
 
+                # Sampling gate: only check at depth 0 to keep fixture trees intact
+                if ctx.trace_depth == 0 and not should_record():
+                    return await f(*args, **kwargs)
+
                 ordinal = ctx.next_ordinal(input_fp)
                 ctx.trace_depth += 1
                 stubs_snapshot = len(ctx.collected_stubs)
@@ -259,6 +266,10 @@ def sim_trace(
 
                 if ctx.is_replaying:
                     return _replay(qualname, input_fp, args_data, ctx)
+
+                # Sampling gate: only check at depth 0 to keep fixture trees intact
+                if ctx.trace_depth == 0 and not should_record():
+                    return f(*args, **kwargs)
 
                 ordinal = ctx.next_ordinal(input_fp)
                 ctx.trace_depth += 1
