@@ -256,3 +256,51 @@ class TestDownloadAndParse:
 
         with pytest.raises(ClientError):
             download_and_parse(mock_s3, "bucket", "key.json")
+
+
+class TestComputeContentHash:
+    """Tests for compute_content_hash — SHA-256 of canonical fixture body."""
+
+    def test_returns_64_char_hex(self):
+        """Hash is a 64-character hex string (SHA-256)."""
+        from fixture_service.indexer import compute_content_hash
+
+        fixture = _make_fixture_json()
+        h = compute_content_hash(fixture)
+
+        assert isinstance(h, str)
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_deterministic(self):
+        """Same fixture always produces the same hash."""
+        from fixture_service.indexer import compute_content_hash
+
+        fixture = _make_fixture_json()
+        assert compute_content_hash(fixture) == compute_content_hash(fixture)
+
+    def test_key_order_independent(self):
+        """Dict key order does not affect the hash (canonical JSON sorts keys)."""
+        from fixture_service.indexer import compute_content_hash
+
+        f1 = {"input": {"a": 1, "b": 2}, "stubs": []}
+        f2 = {"stubs": [], "input": {"b": 2, "a": 1}}
+        assert compute_content_hash(f1) == compute_content_hash(f2)
+
+    def test_different_content_different_hash(self):
+        """Different fixture content produces a different hash."""
+        from fixture_service.indexer import compute_content_hash
+
+        f1 = _make_fixture_json()
+        f2 = _make_fixture_json()
+        f2["output"] = {"price": 0.01}  # different output
+        assert compute_content_hash(f1) != compute_content_hash(f2)
+
+    def test_hashes_input_and_stubs(self):
+        """Hash covers both input and stubs (the dedup identity)."""
+        from fixture_service.indexer import compute_content_hash
+
+        f1 = _make_fixture_json()
+        f2 = _make_fixture_json()
+        f2["stubs"] = []  # remove stubs
+        assert compute_content_hash(f1) != compute_content_hash(f2)

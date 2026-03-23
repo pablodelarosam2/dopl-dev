@@ -18,6 +18,7 @@ Architectural constraints (from CLAUDE.md):
   - Content-hash dedup makes processing idempotent (SQS at-least-once is safe).
 """
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -190,3 +191,26 @@ def download_and_parse(s3_client: Any, bucket: str, s3_key: str) -> Dict[str, An
         return json.loads(body_bytes)
     except (json.JSONDecodeError, TypeError) as exc:
         raise ValueError(f"Malformed fixture JSON from s3://{bucket}/{s3_key}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Content Hash
+# ---------------------------------------------------------------------------
+
+def compute_content_hash(fixture: Dict[str, Any]) -> str:
+    """Compute SHA-256 content hash of a fixture for deduplication.
+
+    The hash covers the full fixture body using canonical JSON serialization
+    (sorted keys, no whitespace) to ensure determinism regardless of key order.
+
+    This is the deduplication identity per the architectural invariant:
+    "Same hash = same fixture."
+
+    Args:
+        fixture: Parsed fixture dict.
+
+    Returns:
+        64-character lowercase hex SHA-256 digest.
+    """
+    canonical = json.dumps(fixture, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
