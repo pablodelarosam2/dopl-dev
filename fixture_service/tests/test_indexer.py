@@ -92,3 +92,50 @@ class TestParseS3Event:
         msg = {"MessageId": "bad", "ReceiptHandle": "r", "Body": json.dumps(s3_event)}
         with pytest.raises(ValueError, match="Missing s3 object key"):
             parse_s3_event(msg)
+
+
+class TestParseS3Key:
+    """Tests for parse_s3_key — extracts metadata from the structured S3 key."""
+
+    def test_standard_key(self):
+        """Parses a standard structured S3 key."""
+        from fixture_service.indexer import parse_s3_key
+
+        result = parse_s3_key("fixtures/pricing-api/post_quote/2026-03-21/abc123.json")
+
+        assert result.service == "pricing-api"
+        assert result.endpoint_key == "post_quote"
+        assert result.date == "2026-03-21"
+        assert result.fixture_id == "abc123"
+
+    def test_nested_endpoint_key(self):
+        """Parses a key where the endpoint_key has underscores."""
+        from fixture_service.indexer import parse_s3_key
+
+        result = parse_s3_key("fixtures/checkout-svc/get_checkout_status/2026-03-22/def456.json")
+
+        assert result.service == "checkout-svc"
+        assert result.endpoint_key == "get_checkout_status"
+        assert result.date == "2026-03-22"
+        assert result.fixture_id == "def456"
+
+    def test_strips_json_extension_from_fixture_id(self):
+        """fixture_id does not include the .json extension."""
+        from fixture_service.indexer import parse_s3_key
+
+        result = parse_s3_key("fixtures/svc/post_data/2026-01-01/uuid-value.json")
+        assert result.fixture_id == "uuid-value"
+
+    def test_raises_on_too_few_segments(self):
+        """Raises ValueError if key has fewer than 5 segments."""
+        from fixture_service.indexer import parse_s3_key
+
+        with pytest.raises(ValueError, match="Invalid S3 key format"):
+            parse_s3_key("fixtures/svc/only-three-parts")
+
+    def test_raises_on_wrong_prefix(self):
+        """Raises ValueError if key does not start with 'fixtures/'."""
+        from fixture_service.indexer import parse_s3_key
+
+        with pytest.raises(ValueError, match="Invalid S3 key format"):
+            parse_s3_key("other/svc/post_data/2026-01-01/id.json")

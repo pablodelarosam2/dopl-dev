@@ -83,3 +83,57 @@ def parse_s3_event(sqs_message: Dict[str, Any]) -> S3EventInfo:
         bucket=bucket,
         event_time=record.get("eventTime", ""),
     )
+
+
+@dataclass(frozen=True)
+class S3KeyMetadata:
+    """Metadata extracted from a structured S3 fixture key.
+
+    Key format: fixtures/{service}/{endpoint_key}/{date}/{fixture_id}.json
+    """
+
+    service: str
+    endpoint_key: str
+    date: str
+    fixture_id: str
+
+
+# ---------------------------------------------------------------------------
+# S3 Key Parsing
+# ---------------------------------------------------------------------------
+
+def parse_s3_key(s3_key: str) -> S3KeyMetadata:
+    """Extract service, endpoint_key, date, and fixture_id from a structured S3 key.
+
+    Expected format::
+
+        fixtures/{service}/{endpoint_key}/{date}/{fixture_id}.json
+
+    Args:
+        s3_key: The full S3 object key.
+
+    Returns:
+        S3KeyMetadata with parsed components.
+
+    Raises:
+        ValueError: If the key does not match the expected format.
+    """
+    parts = s3_key.split("/")
+    if len(parts) < 5 or parts[0] != "fixtures":
+        raise ValueError(
+            f"Invalid S3 key format: expected 'fixtures/{{service}}/{{endpoint_key}}/{{date}}/{{id}}.json', "
+            f"got '{s3_key}'"
+        )
+
+    service = parts[1]
+    endpoint_key = parts[2]
+    date = parts[3]
+    filename = parts[4]
+    fixture_id = filename.removesuffix(".json")
+
+    return S3KeyMetadata(
+        service=service,
+        endpoint_key=endpoint_key,
+        date=date,
+        fixture_id=fixture_id,
+    )
